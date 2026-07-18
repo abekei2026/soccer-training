@@ -740,10 +740,16 @@ function updateAI(p, dt) {
 function updateDefense(dt) {
   const goalCx = FIELD.w / 2;
 
-  // GK: ゴール前でボールの横位置についていく
+  // GK: シュート中は着地点を予測、それ以外はボールの横位置についていく
   const gk = defenders.find(d => d.isGK);
-  const gtx = Math.max(goalCx - FIELD.goalW / 2 + 0.7,
-              Math.min(goalCx + FIELD.goalW / 2 - 0.7, ball.x));
+  let targetX = ball.x;
+  if (ball.isShot && !ball.owner && ball.vy < -0.01) {
+    const t = (gk.y - ball.y) / ball.vy;
+    if (t > 0) targetX = ball.x + ball.vx * t;
+  }
+  const postPad = gk.radius * 0.4;  // ポストぎりぎりまで反応できるように余白を最小限に
+  const gtx = Math.max(goalCx - FIELD.goalW / 2 + postPad,
+              Math.min(goalCx + FIELD.goalW / 2 - postPad, targetX));
   moveToward(gk, gtx, 1.2, GK_SPEED, dt);
 
   // フィールドDF: ボールに一番近い1人がプレス、残りは攻撃側をマーク
@@ -1151,7 +1157,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v9)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v10)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
