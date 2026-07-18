@@ -267,6 +267,12 @@ canvas.addEventListener('touchstart', e => {
       buttonTouches.add(t.identifier);
       continue;
     }
+    // 判断タイム/そうさモードのボタンは、スティックの判定範囲と近くても
+    // 必ずボタンとして扱う(スティック起動より先にチェックする)
+    if (inJudgeButton(t.clientX, t.clientY) || inControlButton(t.clientX, t.clientY)) {
+      handleTap(t.clientX, t.clientY);
+      continue;
+    }
     const [hx, hy] = stickHome();
     const nearStick = Math.hypot(t.clientX - hx, t.clientY - hy) < 130;
     const leftBottom = t.clientX < window.innerWidth * 0.45 &&
@@ -321,8 +327,8 @@ canvas.addEventListener('touchcancel', e => endTouch(e, true), { passive: false 
 canvas.addEventListener('mousedown', e => handleTap(e.clientX, e.clientY));
 
 function judgeButtonRect() {
-  // スコア表示のすぐ下
-  return [10, 114, 150, 36];
+  // 画面右下、かたむきボタンの上に縦積み
+  return [window.innerWidth - 152, window.innerHeight - 148, 144, 36];
 }
 
 function inJudgeButton(x, y) {
@@ -337,8 +343,8 @@ function toggleJudge() {
 }
 
 function controlButtonRect() {
-  // 判断タイムボタンのすぐ下
-  return [10, 156, 150, 36];
+  // 判断タイムボタンのすぐ下、かたむきボタンのすぐ上
+  return [window.innerWidth - 152, window.innerHeight - 104, 144, 36];
 }
 
 function inControlButton(x, y) {
@@ -1006,7 +1012,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 3 / v7)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 3 / v8)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -1086,9 +1092,6 @@ function drawScore() {
   ctx.font = 'bold 16px sans-serif';
   ctx.textAlign = 'left';
   ctx.fillText('ゴール ' + game.score, 24, 95);
-
-  drawJudgeButton();
-  drawControlButton();
 }
 
 function draw() {
@@ -1103,6 +1106,8 @@ function draw() {
   drawStick();
   drawHUD();
   drawScore();
+  drawJudgeButton();
+  drawControlButton();
   drawJudgeTimer();
   drawCenterMessage();
 }
