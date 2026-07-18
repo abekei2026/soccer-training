@@ -154,6 +154,14 @@ function tiltButtonRect() {
   return [window.innerWidth - 152, 70, 144, 42];
 }
 
+function inTiltButton(x, y) {
+  const [bx, by, bw, bh] = tiltButtonRect();
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+
+// 切り替えボタンに触れている最中の指
+const buttonTouches = new Set();
+
 function toggleTilt() {
   if (tilt.enabled) {
     tilt.enabled = false;
@@ -166,7 +174,10 @@ function toggleTilt() {
     DeviceOrientationEvent.requestPermission().then(state => {
       if (state === 'granted') enableTilt();
       else showToast('センサーの きょかが もらえなかったよ');
-    }).catch(() => showToast('センサーが つかえないよ (HTTPSで ひらいてね)'));
+    }).catch(err => {
+      console.log('requestPermission error:', err);
+      showToast('センサーが つかえなかったよ');
+    });
   } else {
     enableTilt();
   }
@@ -198,14 +209,11 @@ function showToast(text) {
 canvas.addEventListener('touchstart', e => {
   e.preventDefault();
   for (const t of e.changedTouches) {
-    // 操作切り替えボタン
-    if (tilt.supported) {
-      const [bx, by, bw, bh] = tiltButtonRect();
-      if (t.clientX >= bx && t.clientX <= bx + bw &&
-          t.clientY >= by && t.clientY <= by + bh) {
-        toggleTilt();
-        continue;
-      }
+    // 操作切り替えボタン: iOSのセンサー許可は touchend でしか呼べないので
+    // ここでは「ボタンに触れた」ことだけ覚えておく
+    if (tilt.supported && inTiltButton(t.clientX, t.clientY)) {
+      buttonTouches.add(t.identifier);
+      continue;
     }
     const [hx, hy] = stickHome();
     const nearStick = Math.hypot(t.clientX - hx, t.clientY - hy) < 130;
@@ -237,9 +245,16 @@ canvas.addEventListener('touchmove', e => {
   }
 }, { passive: false });
 
-function endTouch(e) {
+function endTouch(e, isCancel) {
   e.preventDefault();
   for (const t of e.changedTouches) {
+    if (buttonTouches.has(t.identifier)) {
+      buttonTouches.delete(t.identifier);
+      // 指を離した位置がボタンの上なら切り替え(touchend はiOSの
+      // ユーザー操作として認められるので、ここなら許可ダイアログが出せる)
+      if (!isCancel && inTiltButton(t.clientX, t.clientY)) toggleTilt();
+      continue;
+    }
     if (stick.active && t.identifier === stick.touchId) {
       stick.active = false;
       stick.touchId = null;
@@ -247,8 +262,8 @@ function endTouch(e) {
     }
   }
 }
-canvas.addEventListener('touchend', endTouch, { passive: false });
-canvas.addEventListener('touchcancel', endTouch, { passive: false });
+canvas.addEventListener('touchend', e => endTouch(e, false), { passive: false });
+canvas.addEventListener('touchcancel', e => endTouch(e, true), { passive: false });
 
 // PCクリック → パス
 canvas.addEventListener('mousedown', e => handleTap(e.clientX, e.clientY));
