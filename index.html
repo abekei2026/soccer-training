@@ -133,6 +133,23 @@ const defenders = [
 ];
 const everyone = [...players, ...defenders];
 
+// たいせんモード専用: 下ゴールを守る青いキーパー(れんしゅうモードでは使わない)
+const blueGK = makePlayer(20, FIELD.w / 2, FIELD.h - 1.2, false);
+blueGK.isGK = true;
+
+// たいせんモードの状態
+const MATCH = {
+  mode: null,        // null / 'practice' / 'versus'
+  duration: 120,
+  timeLeft: 0,
+  attacker: 'blue',  // 今どちらが攻撃中か
+  state: 'play',     // 'play' / 'turnover' / 'goal'
+  timer: 0,
+  message: '',
+  blueScore: 0,
+  redScore: 0
+};
+
 // ゲーム進行の状態
 const game = {
   state: 'play',   // 'play' / 'goal' / 'lost'
@@ -417,12 +434,42 @@ function toggleControlMode() {
   }
 }
 
-function startButtonRect() {
-  const w = 220, h = 64;
-  return [(window.innerWidth - w) / 2, window.innerHeight * 0.62, w, h];
+function practiceButtonRect() {
+  const w = 240, h = 56;
+  return [(window.innerWidth - w) / 2, window.innerHeight * 0.58, w, h];
 }
-function inStartButton(x, y) {
-  const [bx, by, bw, bh] = startButtonRect();
+function inPracticeButton(x, y) {
+  const [bx, by, bw, bh] = practiceButtonRect();
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+
+function versusButtonRect() {
+  const w = 240, h = 56;
+  return [(window.innerWidth - w) / 2, window.innerHeight * 0.58 + 68, w, h];
+}
+function inVersusButton(x, y) {
+  const [bx, by, bw, bh] = versusButtonRect();
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+
+function timeButtonRect(i) {
+  const w = 220, h = 54, gap = 16;
+  const totalH = h * 3 + gap * 2;
+  const startY = (window.innerHeight - totalH) / 2;
+  return [(window.innerWidth - w) / 2, startY + i * (h + gap), w, h];
+}
+function inTimeButton(x, y, i) {
+  const [bx, by, bw, bh] = timeButtonRect(i);
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+
+function timeBackLinkRect() {
+  const [, by, , bh] = timeButtonRect(2);
+  const w = 160, h = 34;
+  return [(window.innerWidth - w) / 2, by + bh + 22, w, h];
+}
+function inTimeBackLink(x, y) {
+  const [bx, by, bw, bh] = timeBackLinkRect();
   return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
 }
 
@@ -445,6 +492,7 @@ function inTitleLink(x, y) {
 }
 
 function startRound() {
+  MATCH.mode = 'practice';
   game.score = 0;
   stats.shots = 0; stats.saved = 0; stats.missed = 0;
   stats.passCut = 0; stats.dribbleSteal = 0;
@@ -480,14 +528,47 @@ function computeCoachAdvice() {
 
 function handleTap(sx, sy) {
   if (APP.screen === 'title') {
-    if (inStartButton(sx, sy)) { sfxClick(); startRound(); }
+    if (inPracticeButton(sx, sy)) { sfxClick(); startRound(); }
+    else if (inVersusButton(sx, sy)) { sfxClick(); APP.screen = 'timeSelect'; }
+    return;
+  }
+  if (APP.screen === 'timeSelect') {
+    if (inTimeButton(sx, sy, 0)) { sfxClick(); startVersusRound(60); }
+    else if (inTimeButton(sx, sy, 1)) { sfxClick(); startVersusRound(120); }
+    else if (inTimeButton(sx, sy, 2)) { sfxClick(); startVersusRound(180); }
+    else if (inTimeBackLink(sx, sy)) { sfxClick(); APP.screen = 'title'; }
     return;
   }
   if (APP.screen === 'result') {
-    if (inReplayButton(sx, sy)) { sfxClick(); startRound(); }
-    else if (inTitleLink(sx, sy)) { sfxClick(); APP.screen = 'title'; }
+    if (inReplayButton(sx, sy)) {
+      sfxClick();
+      if (MATCH.mode === 'versus') startVersusRound(MATCH.duration);
+      else startRound();
+    } else if (inTitleLink(sx, sy)) { sfxClick(); APP.screen = 'title'; }
     return;
   }
+
+  if (MATCH.mode === 'versus') {
+    if (MATCH.state !== 'play') return;
+    if (MATCH.attacker !== 'blue' || ball.owner !== userPlayer) return;
+    const [fx, fy] = toField(sx, sy);
+    const goalCx = FIELD.w / 2;
+    if (fy < 3.0 && Math.abs(fx - goalCx) < FIELD.goalW / 2 + 1.5) {
+      const aimX = Math.max(goalCx - FIELD.goalW / 2 + 0.4,
+                   Math.min(goalCx + FIELD.goalW / 2 - 0.4, fx));
+      versusShoot(userPlayer, aimX, 0);
+      return;
+    }
+    let vBest = null, vBestD = TAP_RADIUS;
+    for (const p of players) {
+      if (p === userPlayer) continue;
+      const d = Math.hypot(p.x - fx, p.y - fy);
+      if (d < vBestD) { vBestD = d; vBest = p; }
+    }
+    if (vBest) versusPass(userPlayer, vBest);
+    return;
+  }
+
   if (inJudgeButton(sx, sy)) { sfxClick(); toggleJudge(); return; }
   if (inControlButton(sx, sy)) { sfxClick(); toggleControlMode(); return; }
   if (game.state !== 'play') return;
@@ -679,6 +760,346 @@ function setupKickoff() {
 function setupBacklineRestart() {
   resetDefense();
   resetAttack(FIELD.w / 2, FIELD.h * 0.85, FIELD.h * 0.65);
+}
+
+// ============================================================
+// たいせんモード(攻守切り替え・2ゴール)専用ロジック
+// れんしゅうモードのupdate()/giveBall()等とは完全に独立させてある
+// ============================================================
+function attackGoalY(team) { return team === 'blue' ? 0 : FIELD.h; }
+function ownGoalY(team)    { return team === 'blue' ? FIELD.h : 0; }
+function oppTeam(team)     { return team === 'blue' ? 'red' : 'blue'; }
+function teamOutfield(team) { return team === 'blue' ? players : defenders.filter(d => !d.isGK); }
+function teamGK(team)       { return team === 'blue' ? blueGK : defenders.find(d => d.isGK); }
+
+function versusPass(from, to) {
+  const lead = 0.25;
+  const tx = to.x + to.vx * lead, ty = to.y + to.vy * lead;
+  const dx = tx - ball.x, dy = ty - ball.y;
+  const len = Math.hypot(dx, dy) || 1;
+  ball.vx = dx / len * PASS_SPEED;
+  ball.vy = dy / len * PASS_SPEED;
+  ball.owner = null;
+  ball.lastKicker = from;
+  ball.kickCooldown = KICK_COOLDOWN;
+  ball.receiver = to;
+  from.fx = dx / len; from.fy = dy / len;
+  sfxPass();
+}
+
+function versusShoot(from, aimX, goalY) {
+  const dx = aimX - ball.x, dy = goalY - ball.y;
+  const len = Math.hypot(dx, dy) || 1;
+  ball.vx = dx / len * SHOOT_SPEED;
+  ball.vy = dy / len * SHOOT_SPEED;
+  ball.owner = null;
+  ball.lastKicker = from;
+  ball.kickCooldown = KICK_COOLDOWN;
+  ball.receiver = null;
+  from.fx = dx / len; from.fy = dy / len;
+  sfxShoot();
+}
+
+function versusGiveBall(p) {
+  const wasAttacker = p.team === MATCH.attacker;
+  ball.owner = p;
+  ball.vx = 0; ball.vy = 0;
+  ball.receiver = null;
+  if (p !== userPlayer) {
+    p.holdTimer = 0;
+    p.holdLimit = 0.9 + Math.random() * 0.9;
+  }
+  if (!wasAttacker) {
+    MATCH.attacker = p.team;
+    showToast(p.isGK ? 'キーパーが キャッチ!' : (p.team === 'blue' ? 'こうげき スタート!' : 'あいての こうげき!'));
+    sfxLost();
+  } else {
+    sfxPass();
+  }
+}
+
+function versusTurnover(newAttacker, message) {
+  MATCH.attacker = newAttacker;
+  MATCH.state = 'turnover';
+  MATCH.timer = 1.3;
+  MATCH.message = message;
+  ball.owner = null;
+  ball.receiver = null;
+  ball.vx = 0; ball.vy = 0;
+  sfxLost();
+}
+
+function versusGoal(scoringTeam) {
+  if (scoringTeam === 'blue') {
+    MATCH.blueScore++;
+    MATCH.message = 'ゴーール!';
+    sfxGoal();
+  } else {
+    MATCH.redScore++;
+    MATCH.message = 'あいてに ゴールされた…';
+    sfxLost();
+  }
+  MATCH.state = 'goal';
+  MATCH.timer = 1.8;
+  MATCH.attacker = scoringTeam === 'blue' ? 'red' : 'blue';
+  ball.vx = 0; ball.vy = 0;
+}
+
+// 攻撃側のフォーメーションに全員を並べ直す(キックオフ/得点後/ターンオーバー後で共通利用)
+function versusFormation(attacker) {
+  const goalCx = FIELD.w / 2;
+  if (attacker === 'blue') {
+    userPlayer.x = goalCx; userPlayer.y = FIELD.h * 0.60;
+    players[1].x = FIELD.w * 0.25; players[1].y = FIELD.h * 0.55;
+    players[2].x = FIELD.w * 0.75; players[2].y = FIELD.h * 0.55;
+    defenders[0].x = FIELD.w * 0.3; defenders[0].y = 11;
+    defenders[1].x = FIELD.w * 0.7; defenders[1].y = 11;
+    defenders[2].x = goalCx;        defenders[2].y = 6.5;
+  } else {
+    defenders[0].x = FIELD.w * 0.25; defenders[0].y = FIELD.h * 0.40;
+    defenders[1].x = FIELD.w * 0.75; defenders[1].y = FIELD.h * 0.40;
+    defenders[2].x = goalCx;         defenders[2].y = FIELD.h * 0.45;
+    userPlayer.x = goalCx;      userPlayer.y = FIELD.h - 11;
+    players[1].x = FIELD.w * 0.3; players[1].y = FIELD.h - 11;
+    players[2].x = FIELD.w * 0.7; players[2].y = FIELD.h - 6.5;
+  }
+  defenders[3].x = goalCx; defenders[3].y = 1.2;         // 赤GK(自陣ゴール前)
+  blueGK.x = goalCx;       blueGK.y = FIELD.h - 1.2;     // 青GK(自陣ゴール前)
+
+  for (const p of [...players, ...defenders, blueGK]) {
+    p.vx = 0; p.vy = 0; p.fx = 0; p.fy = attacker === 'blue' ? -1 : 1;
+  }
+  ball.lastKicker = null;
+  ball.kickCooldown = 0;
+
+  const kicker = attacker === 'blue' ? userPlayer : defenders[2];
+  ball.owner = kicker;
+  ball.receiver = null;
+  ball.vx = 0; ball.vy = 0;
+  if (kicker !== userPlayer) {
+    kicker.holdTimer = 0;
+    kicker.holdLimit = 0.9 + Math.random() * 0.9;
+  }
+  ball.x = kicker.x; ball.y = kicker.y + (attacker === 'blue' ? -0.75 : 0.75);
+}
+
+function versusSupportSpot(p, team) {
+  const mates = teamOutfield(team).filter(q => q !== userPlayer);
+  const idx = mates.indexOf(p);
+  const side = idx === 0 ? -1 : 1;
+  const dir = team === 'blue' ? -1 : 1;
+  let tx = ball.x + side * 5.5;
+  let ty = ball.y + dir * 4.5;
+  const m = 1.5;
+  tx = Math.max(m, Math.min(FIELD.w - m, tx));
+  ty = Math.max(m, Math.min(FIELD.h - m, ty));
+  return [tx, ty];
+}
+
+function versusAttackAI(p, dt, team) {
+  const dir = team === 'blue' ? -1 : 1;
+  const goalY = attackGoalY(team);
+  const mates = teamOutfield(team);
+  let tx = p.x, ty = p.y;
+
+  if (ball.owner === p) {
+    p.holdTimer += dt;
+    ty = p.y + dir * 1.5;
+    const nearGoal = dir === -1 ? p.y < 10 : p.y > FIELD.h - 10;
+    if (p.holdTimer >= p.holdLimit) {
+      if (nearGoal) {
+        const goalCx = FIELD.w / 2;
+        const aimX = goalCx + (Math.random() * 2 - 1) * (FIELD.goalW / 2 - 0.5);
+        versusShoot(p, aimX, goalY);
+      } else {
+        const targets = mates.filter(q => q !== p);
+        const to = targets[Math.floor(Math.random() * targets.length)];
+        versusPass(p, to);
+      }
+    }
+  } else if (ball.receiver === p && !ball.owner) {
+    tx = ball.x + ball.vx * 0.2;
+    ty = ball.y + ball.vy * 0.2;
+  } else if (!ball.owner && !ball.receiver) {
+    let nearest = null, nd = Infinity;
+    for (const q of mates) {
+      if (q === userPlayer) continue;
+      const d = Math.hypot(ball.x - q.x, ball.y - q.y);
+      if (d < nd) { nd = d; nearest = q; }
+    }
+    if (nearest === p) { tx = ball.x; ty = ball.y; }
+    else { [tx, ty] = versusSupportSpot(p, team); }
+  } else {
+    [tx, ty] = versusSupportSpot(p, team);
+  }
+  moveToward(p, tx, ty, AI_SPEED, dt);
+}
+
+function versusDefendAI(p, dt, team) {
+  const mates = teamOutfield(team).filter(q => q !== userPlayer);
+  let amClosest = true;
+  const myDist = Math.hypot(ball.x - p.x, ball.y - p.y);
+  for (const q of mates) {
+    if (q === p) continue;
+    if (Math.hypot(ball.x - q.x, ball.y - q.y) < myDist) { amClosest = false; break; }
+  }
+  let tx, ty;
+  if (amClosest) {
+    tx = ball.x; ty = ball.y;
+  } else {
+    const goalCx = FIELD.w / 2;
+    const oppMates = teamOutfield(oppTeam(team));
+    const idx = Math.max(0, mates.indexOf(p));
+    const m = oppMates[idx % oppMates.length];
+    const gY = ownGoalY(team);
+    tx = m.x + (goalCx - m.x) * 0.3;
+    ty = m.y + (gY - m.y) * 0.3;
+  }
+  moveToward(p, tx, ty, DF_SPEED, dt);
+}
+
+function versusGKIdle(gk, dt, team) {
+  const goalCx = FIELD.w / 2;
+  const gty = ownGoalY(team) + (team === 'blue' ? -1.2 : 1.2);
+  const gtx = Math.max(goalCx - 1.5, Math.min(goalCx + 1.5, ball.x));
+  moveToward(gk, gtx, gty, GK_SPEED * 0.6, dt);
+}
+
+function versusGKDefend(gk, dt, team) {
+  const goalCx = FIELD.w / 2;
+  const gty = ownGoalY(team) + (team === 'blue' ? -1.2 : 1.2);
+  let targetX = ball.x;
+  const approaching = team === 'blue' ? ball.vy > 0.01 : ball.vy < -0.01;
+  if (!ball.owner && approaching) {
+    const t = (gty - ball.y) / ball.vy;
+    if (t > 0 && isFinite(t)) targetX = ball.x + ball.vx * t;
+  }
+  const postPad = gk.radius * 0.4;
+  const gtx = Math.max(goalCx - FIELD.goalW / 2 + postPad,
+              Math.min(goalCx + FIELD.goalW / 2 - postPad, targetX));
+  moveToward(gk, gtx, gty, GK_SPEED, dt);
+}
+
+function startVersusRound(duration) {
+  MATCH.mode = 'versus';
+  MATCH.duration = duration;
+  MATCH.timeLeft = duration;
+  MATCH.blueScore = 0;
+  MATCH.redScore = 0;
+  MATCH.attacker = 'blue';
+  MATCH.state = 'play';
+  controlledPlayer = userPlayer;
+  APP.screen = 'play';
+  versusFormation('blue');
+  sfxWhistle();
+}
+
+function endVersusRound() {
+  APP.screen = 'result';
+  sfxWhistle();
+}
+
+function updateVersus(dt) {
+  if (MATCH.state !== 'play') {
+    MATCH.timer -= dt;
+    if (MATCH.timer <= 0) {
+      versusFormation(MATCH.attacker);
+      MATCH.state = 'play';
+    }
+    return;
+  }
+
+  // ユーザー入力(たいせんモードでは常にuserPlayerを直接操作)
+  let ix = 0, iy = 0;
+  if (keys['ArrowLeft']  || keys['a'] || keys['A']) ix -= 1;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) ix += 1;
+  if (keys['ArrowUp']    || keys['w'] || keys['W']) iy -= 1;
+  if (keys['ArrowDown']  || keys['s'] || keys['S']) iy += 1;
+  if (stick.active) { ix += stick.dx; iy += stick.dy; }
+  if (tilt.enabled && tilt.beta0 !== null) {
+    ix += tiltAxis(tilt.gamma - tilt.gamma0);
+    iy += tiltAxis(tilt.beta - tilt.beta0);
+  }
+  const ilen = Math.hypot(ix, iy);
+  if (ilen > 0.01) {
+    const n = Math.min(1, ilen);
+    userPlayer.vx = ix / ilen * PLAYER_SPEED * n;
+    userPlayer.vy = iy / ilen * PLAYER_SPEED * n;
+    userPlayer.fx = ix / ilen; userPlayer.fy = iy / ilen;
+  } else {
+    userPlayer.vx = 0; userPlayer.vy = 0;
+  }
+
+  // 青チームAI(ユーザー以外)
+  for (const p of players) {
+    if (p === userPlayer) continue;
+    if (MATCH.attacker === 'blue') versusAttackAI(p, dt, 'blue');
+    else versusDefendAI(p, dt, 'blue');
+  }
+  if (MATCH.attacker === 'blue') versusGKIdle(blueGK, dt, 'blue');
+  else versusGKDefend(blueGK, dt, 'blue');
+
+  // 赤チームAI
+  for (const d of defenders) {
+    if (d.isGK) continue;
+    if (MATCH.attacker === 'red') versusAttackAI(d, dt, 'red');
+    else versusDefendAI(d, dt, 'red');
+  }
+  const redGK = defenders.find(d => d.isGK);
+  if (MATCH.attacker === 'red') versusGKIdle(redGK, dt, 'red');
+  else versusGKDefend(redGK, dt, 'red');
+
+  // 移動+コート内クランプ
+  const roster = [...players, ...defenders, blueGK];
+  for (const p of roster) {
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.x = Math.max(p.radius, Math.min(FIELD.w - p.radius, p.x));
+    p.y = Math.max(p.radius, Math.min(FIELD.h - p.radius, p.y));
+  }
+
+  // ボール
+  if (ball.kickCooldown > 0) ball.kickCooldown -= dt;
+  const goalCx = FIELD.w / 2;
+
+  if (ball.owner) {
+    const o = ball.owner;
+    ball.x = o.x + o.fx * 0.75;
+    ball.y = o.y + o.fy * 0.75;
+    ball.vx = 0; ball.vy = 0;
+
+    const defTeam = oppTeam(MATCH.attacker);
+    const defRoster = defTeam === 'blue' ? [...players, blueGK] : defenders;
+    for (const d of defRoster) {
+      if (d === o) continue;
+      const dist = Math.hypot(ball.x - d.x, ball.y - d.y);
+      if (dist < STEAL_DIST) {
+        versusTurnover(defTeam, d.isGK ? 'キーパーが キャッチ!' : 'とられた!');
+        return;
+      }
+    }
+  } else {
+    ball.x += ball.vx * dt; ball.y += ball.vy * dt;
+    const damp = Math.pow(0.35, dt);
+    ball.vx *= damp; ball.vy *= damp;
+
+    if (ball.y < ball.radius) {
+      if (Math.abs(ball.x - goalCx) < FIELD.goalW / 2) { versusGoal('blue'); return; }
+      ball.y = ball.radius; ball.vy *= -0.6;
+    }
+    if (ball.y > FIELD.h - ball.radius) {
+      if (Math.abs(ball.x - goalCx) < FIELD.goalW / 2) { versusGoal('red'); return; }
+      ball.y = FIELD.h - ball.radius; ball.vy *= -0.6;
+    }
+    if (ball.x < ball.radius)           { ball.x = ball.radius;           ball.vx *= -0.6; }
+    if (ball.x > FIELD.w - ball.radius) { ball.x = FIELD.w - ball.radius; ball.vx *= -0.6; }
+
+    const roster2 = [...players, ...defenders, blueGK];
+    for (const p of roster2) {
+      if (p === ball.lastKicker && ball.kickCooldown > 0) continue;
+      const dist = Math.hypot(ball.x - p.x, ball.y - p.y);
+      if (dist < CAPTURE_DIST) { versusGiveBall(p); break; }
+    }
+  }
 }
 
 // 目標地点へ移動する(近づいたら減速)
@@ -960,6 +1381,29 @@ function drawField() {
   }
 }
 
+// たいせんモード専用: 下側のゴール(れんしゅうモードでは呼ばない)
+function drawBottomGoal() {
+  const s = view.scale;
+  const [pax, pay] = toScreen((FIELD.w - 12) / 2, FIELD.h - 5);
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = Math.max(2, s * 0.08);
+  ctx.strokeRect(pax, pay, 12 * s, 5 * s);
+
+  const [gx, gy] = toScreen((FIELD.w - FIELD.goalW) / 2, FIELD.h);
+  const goalDepth = 1.1 * s;
+  ctx.fillStyle = '#f5f5f5';
+  ctx.fillRect(gx, gy, FIELD.goalW * s, goalDepth);
+  ctx.strokeStyle = '#cccccc';
+  ctx.lineWidth = 1.5;
+  for (let i = 1; i < 8; i++) {
+    const nx = gx + FIELD.goalW * s * (i / 8);
+    ctx.beginPath();
+    ctx.moveTo(nx, gy);
+    ctx.lineTo(nx, gy + goalDepth);
+    ctx.stroke();
+  }
+}
+
 function drawPlayer(p) {
   const [sx, sy] = toScreen(p.x, p.y);
   const r = p.radius * view.scale;
@@ -980,7 +1424,7 @@ function drawPlayer(p) {
   }
 
   // 自分がボール保持中 → 味方に「パスできるよ」の点滅リング
-  if (ball.owner === controlledPlayer && p !== controlledPlayer && p.team === 'blue') {
+  if (ball.owner === controlledPlayer && p !== controlledPlayer && p.team === 'blue' && !p.isGK) {
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
     ctx.strokeStyle = `rgba(255,255,255,${0.35 + 0.45 * pulse})`;
     ctx.lineWidth = 2.5;
@@ -1158,7 +1602,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v11)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v12)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -1316,25 +1760,34 @@ function drawTitleScreen() {
   ctx.fillText('サッカー あたま', cx, window.innerHeight * 0.18);
   ctx.fillText('トレーニング', cx, window.innerHeight * 0.18 + 40);
 
-  ctx.font = 'bold 14px sans-serif';
+  ctx.font = 'bold 13px sans-serif';
   ctx.fillStyle = '#ffffff';
-  ctx.fillText('うごきかたと パスを かんがえよう!', cx, window.innerHeight * 0.30);
+  ctx.fillText('うごきかたと パスを かんがえよう!', cx, window.innerHeight * 0.28);
 
-  drawTitleInstructions(cx, window.innerHeight * 0.40);
+  drawTitleInstructions(cx, window.innerHeight * 0.36);
 
-  // はじめるボタン
-  const [bx, by, bw, bh] = startButtonRect();
+  drawModeButton(practiceButtonRect(), 'れんしゅうモード', 'うごきと パスの れんしゅう', 'rgba(255,225,77,0.92)');
+  drawModeButton(versusButtonRect(), 'たいせんモード', 'あいてチームと たいせん!', 'rgba(120,200,255,0.92)');
+}
+
+function drawModeButton(rect, label, sub, color) {
+  const [bx, by, bw, bh] = rect;
   const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 300);
-  ctx.fillStyle = `rgba(255,225,77,${0.85 + 0.15 * pulse})`;
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.85 + 0.15 * pulse;
   ctx.beginPath();
-  ctx.roundRect(bx, by, bw, bh, 16);
+  ctx.roundRect(bx, by, bw, bh, 14);
   ctx.fill();
+  ctx.globalAlpha = 1;
   ctx.strokeStyle = '#553c00';
   ctx.lineWidth = 3;
   ctx.stroke();
   ctx.fillStyle = '#553c00';
-  ctx.font = 'bold 26px sans-serif';
-  ctx.fillText('はじめる', bx + bw / 2, by + bh / 2 + 9);
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 19px sans-serif';
+  ctx.fillText(label, bx + bw / 2, by + bh / 2 - 4);
+  ctx.font = '11px sans-serif';
+  ctx.fillText(sub, bx + bw / 2, by + bh / 2 + 15);
 }
 
 function drawResultScreen() {
@@ -1404,9 +1857,154 @@ function drawResultScreen() {
   ctx.fillText('タイトルへ もどる', tbx + tbw / 2, tby + tbh / 2 + 5);
 }
 
+function drawTimeSelectScreen() {
+  drawField();
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  const cx = window.innerWidth / 2;
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillStyle = '#ffe14d';
+  const [, firstBy] = timeButtonRect(0);
+  ctx.fillText('じかんを えらんでね', cx, firstBy - 40);
+
+  const labels = ['みじかい (60びょう)', 'ふつう (120びょう)', 'ながい (180びょう)'];
+  labels.forEach((label, i) => {
+    const [bx, by, bw, bh] = timeButtonRect(i);
+    ctx.fillStyle = 'rgba(255,225,77,0.92)';
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 14);
+    ctx.fill();
+    ctx.strokeStyle = '#553c00';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#553c00';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText(label, bx + bw / 2, by + bh / 2 + 6);
+  });
+
+  const [lbx, lby, lbw, lbh] = timeBackLinkRect();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('タイトルへ もどる', lbx + lbw / 2, lby + lbh / 2 + 5);
+}
+
+function drawVersusHUD() {
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  const w = Math.min(window.innerWidth - 20, 560);
+  ctx.beginPath();
+  ctx.roundRect((window.innerWidth - w) / 2, 8, w, 54, 10);
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 15px sans-serif';
+  ctx.fillText('たいせんモード', window.innerWidth / 2, 30);
+  ctx.font = 'bold 13px sans-serif';
+  ctx.fillStyle = MATCH.attacker === 'blue' ? '#8fffb0' : '#ffb3b3';
+  ctx.fillText(MATCH.attacker === 'blue' ? 'こうげき ちゅう!' : 'しゅび ちゅう!', window.innerWidth / 2, 50);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.beginPath();
+  ctx.roundRect(10, 70, 150, 38, 10);
+  ctx.fill();
+  ctx.fillStyle = '#ffe14d';
+  ctx.font = 'bold 15px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('あなた ' + MATCH.blueScore + ' - ' + MATCH.redScore + ' あいて', 20, 94);
+
+  const secs = Math.max(0, Math.ceil(MATCH.timeLeft));
+  const urgent = secs <= 10;
+  const w2 = 110, h2 = 38, x2 = window.innerWidth - w2 - 10, y2 = 70;
+  ctx.fillStyle = urgent ? 'rgba(180,30,30,0.6)' : 'rgba(0,0,0,0.45)';
+  ctx.beginPath();
+  ctx.roundRect(x2, y2, w2, h2, 10);
+  ctx.fill();
+  ctx.fillStyle = urgent ? '#ffdada' : '#ffffff';
+  ctx.font = 'bold 15px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('のこり ' + secs + 'びょう', x2 + w2 / 2, y2 + 24);
+
+  drawTiltButton();
+  drawToast();
+}
+
+function drawVersusTurnoverMessage() {
+  if (MATCH.state === 'play') return;
+  const cx = window.innerWidth / 2, cy = window.innerHeight * 0.4;
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 34px sans-serif';
+  ctx.lineWidth = 7;
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  ctx.strokeText(MATCH.message, cx, cy);
+  ctx.fillStyle = MATCH.state === 'goal' ? '#ffe14d' : '#ffffff';
+  ctx.fillText(MATCH.message, cx, cy);
+}
+
+function drawVersusPlay() {
+  drawField();
+  drawBottomGoal();
+  drawBall();
+  const roster = [...players, ...defenders, blueGK];
+  const sorted = [...roster].sort((a, b) => a.y - b.y);
+  for (const p of sorted) drawPlayer(p);
+  if (ball.owner) drawBall();
+  drawStick();
+  drawVersusHUD();
+  drawVersusTurnoverMessage();
+}
+
+function drawVersusResultScreen() {
+  drawField();
+  drawBottomGoal();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  const cx = window.innerWidth / 2;
+  ctx.textAlign = 'center';
+
+  let title, titleColor;
+  if (MATCH.blueScore > MATCH.redScore) { title = 'かち!'; titleColor = '#ffe14d'; }
+  else if (MATCH.blueScore < MATCH.redScore) { title = 'まけ…'; titleColor = '#ffffff'; }
+  else { title = 'ひきわけ'; titleColor = '#ffffff'; }
+
+  ctx.font = 'bold 32px sans-serif';
+  ctx.lineWidth = 7;
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+  ctx.strokeText(title, cx, window.innerHeight * 0.16);
+  ctx.fillStyle = titleColor;
+  ctx.fillText(title, cx, window.innerHeight * 0.16);
+
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('あなた ' + MATCH.blueScore + ' - ' + MATCH.redScore + ' あいて', cx, window.innerHeight * 0.26);
+
+  const [rbx, rby, rbw, rbh] = replayButtonRect();
+  ctx.fillStyle = 'rgba(255,225,77,0.92)';
+  ctx.beginPath();
+  ctx.roundRect(rbx, rby, rbw, rbh, 14);
+  ctx.fill();
+  ctx.strokeStyle = '#553c00';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = '#553c00';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('もういちど あそぶ', rbx + rbw / 2, rby + rbh / 2 + 7);
+
+  const [tbx, tby, tbw, tbh] = titleLinkRect();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('タイトルへ もどる', tbx + tbw / 2, tby + tbh / 2 + 5);
+}
+
 function draw() {
   if (APP.screen === 'title') { drawTitleScreen(); return; }
-  if (APP.screen === 'result') { drawResultScreen(); return; }
+  if (APP.screen === 'timeSelect') { drawTimeSelectScreen(); return; }
+  if (APP.screen === 'result') {
+    if (MATCH.mode === 'versus') drawVersusResultScreen(); else drawResultScreen();
+    return;
+  }
+  if (MATCH.mode === 'versus') { drawVersusPlay(); return; }
 
   drawField();
   drawPassLanes();
@@ -1446,7 +2044,15 @@ function loop(now) {
   lastTime = now;
   rawDt = Math.min(rawDt, 0.05);  // タブ復帰時などの大ジャンプを防ぐ
 
-  if (APP.screen === 'play') {
+  if (APP.screen === 'play' && MATCH.mode === 'versus') {
+    MATCH.timeLeft -= rawDt;
+    if (MATCH.timeLeft <= 0) {
+      MATCH.timeLeft = 0;
+      endVersusRound();
+    } else {
+      updateVersus(rawDt);
+    }
+  } else if (APP.screen === 'play') {
     roundTime -= rawDt;
     if (roundTime <= 0) {
       roundTime = 0;
