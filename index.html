@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>サッカーあたまトレーニング</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #1a6e2e;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    font-family: "Hiragino Maru Gothic ProN", "BIZ UDGothic", "Meiryo", sans-serif;
+  }
+  #game {
+    display: block;
+    width: 100%; height: 100%;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+"use strict";
+
+// ============================================================
+// サッカーあたまトレーニング - Phase 1
+// フィールド描画 / プレイヤー移動(キーボード+バーチャルスティック)
+// 味方AI 2人のパス回し / ボールの移動表現
+// ============================================================
+
+// ---------- 基本設定 ----------
+const FIELD = {
+  w: 20,          // フィールド幅(m) 論理座標
+  h: 32,          // フィールド高さ(m) ゴールは y=0(上)側
+  goalW: 6,       // ゴール幅
+  margin: 2.2     // フィールド外周の余白(描画用)
+};
+
+const PLAYER_SPEED   = 5.0;   // プレイヤー移動速度 m/s
+const AI_SPEED       = 4.2;   // AI移動速度 m/s
+const PASS_SPEED     = 11.0;  // パス時のボール速度 m/s
+const CAPTURE_DIST   = 0.9;   // ボールを拾える距離
+const KICK_COOLDOWN  = 0.45;  // パス直後に自分で拾えない時間(秒)
+const TAP_RADIUS     = 3.0;   // タップでパス相手を選べる範囲(m)
+
+const IS_TOUCH = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// 画面⇔フィールド座標変換用
+let view = { scale: 1, offX: 0, offY: 0 };
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width  = window.innerWidth * dpr;
+  canvas.height = window.innerHeight * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const cw = window.innerWidth;
+  const ch = window.innerHeight;
+  const fw = FIELD.w + FIELD.margin * 2;
+  const fh = FIELD.h + FIELD.margin * 2;
+  view.scale = Math.min(cw / fw, ch / fh);
+  view.offX = (cw - FIELD.w * view.scale) / 2;
+  view.offY = (ch - FIELD.h * view.scale) / 2;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function toScreen(x, y) {
+  return [view.offX + x * view.scale, view.offY + y * view.scale];
+}
+function toField(sx, sy) {
+  return [(sx - view.offX) / view.scale, (sy - view.offY) / view.scale];
+}
+
+// ---------- 選手とボール ----------
+function makePlayer(id, x, y, isUser) {
+  return {
+    id, x, y,
+    vx: 0, vy: 0,
+    fx: 0, fy: -1,        // 向いている方向
+    isUser,
+    radius: 0.55,
+    holdTimer: 0,         // AIがボールを持ってから経過した時間
+    holdLimit: 0          // この時間が来たらパスする
+  };
+}
+
+const players = [
+  makePlayer(0, FIELD.w / 2, FIELD.h * 0.72, true),   // プレイヤー(むらさき)
+  makePlayer(1, FIELD.w * 0.25, FIELD.h * 0.5, false), // 味方AI(あお)
+  makePlayer(2, FIELD.w * 0.75, FIELD.h * 0.5, false)  // 味方AI(あお)
+];
+const userPlayer = players[0];
+
+const ball = {
+  x: FIELD.w * 0.25, y: FIELD.h * 0.5,
+  vx: 0, vy: 0,
+  radius: 0.32,
+  owner: players[1],       // 最初は味方AIが持つ(パス回しがすぐ見える)
+  lastKicker: null,
+  kickCooldown: 0,
+  receiver: null           // パスを受ける予定の選手
+};
+
+// ---------- 入力 ----------
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+// バーチャルスティック
+const stick = {
+  active: false,
+  touchId: null,
+  baseX: 0, baseY: 0,   // スティックの中心(画面座標)
+  dx: 0, dy: 0,         // 入力ベクトル(-1〜1)
+  maxR: 55              // ノブが動ける半径(px)
+};
+
+function stickHome() {
+  // 画面左下の定位置
+  return [90, window.innerHeight - 110];
+}
+
+// かたむき操作
+const tilt = {
+  enabled: false,
+  supported: IS_TOUCH && ('DeviceOrientationEvent' in window),
+  beta0: null, gamma0: null,   // ON にした瞬間の持ち角度(基準)
+  beta: 0, gamma: 0
+};
+
+window.addEventListener('deviceorientation', e => {
+  if (e.beta == null || e.gamma == null) return;
+  tilt.beta = e.beta;
+  tilt.gamma = e.gamma;
+  if (tilt.enabled && tilt.beta0 === null) {
+    // 最初のセンサー値をニュートラルにする(キャリブレーション)
+    tilt.beta0 = e.beta;
+    tilt.gamma0 = e.gamma;
+  }
+});
+
+function tiltButtonRect() {
+  return [window.innerWidth - 152, 70, 144, 42];
+}
+
+function toggleTilt() {
+  if (tilt.enabled) {
+    tilt.enabled = false;
+    showToast('スティックそうさに もどしたよ');
+    return;
+  }
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    // iOS: ユーザー操作の中で許可を取る必要がある
+    DeviceOrientationEvent.requestPermission().then(state => {
+      if (state === 'granted') enableTilt();
+      else showToast('センサーの きょかが もらえなかったよ');
+    }).catch(() => showToast('センサーが つかえないよ (HTTPSで ひらいてね)'));
+  } else {
+    enableTilt();
+  }
+}
+
+function enableTilt() {
+  tilt.enabled = true;
+  tilt.beta0 = null;  // 次に届くセンサー値を基準にする
+  stick.active = false;
+  stick.touchId = null;
+  stick.dx = 0; stick.dy = 0;
+  showToast('かたむきそうさ ON! いまの もちかたが きじゅんだよ');
+}
+
+// 傾き角度(度) → -1〜1 の入力値。小さい傾きは無視する
+function tiltAxis(deg) {
+  const DEAD = 3, MAX = 18;
+  const a = Math.abs(deg);
+  if (a < DEAD) return 0;
+  return Math.sign(deg) * Math.min(1, (a - DEAD) / (MAX - DEAD));
+}
+
+// 画面下部の小さなお知らせ
+let toast = null;
+function showToast(text) {
+  toast = { text, until: performance.now() + 2500 };
+}
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    // 操作切り替えボタン
+    if (tilt.supported) {
+      const [bx, by, bw, bh] = tiltButtonRect();
+      if (t.clientX >= bx && t.clientX <= bx + bw &&
+          t.clientY >= by && t.clientY <= by + bh) {
+        toggleTilt();
+        continue;
+      }
+    }
+    const [hx, hy] = stickHome();
+    const nearStick = Math.hypot(t.clientX - hx, t.clientY - hy) < 130;
+    const leftBottom = t.clientX < window.innerWidth * 0.45 &&
+                       t.clientY > window.innerHeight * 0.55;
+    if (!tilt.enabled && !stick.active && (nearStick || leftBottom)) {
+      stick.active = true;
+      stick.touchId = t.identifier;
+      stick.baseX = t.clientX;
+      stick.baseY = t.clientY;
+      stick.dx = 0; stick.dy = 0;
+    } else {
+      handleTap(t.clientX, t.clientY);
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (stick.active && t.identifier === stick.touchId) {
+      let dx = t.clientX - stick.baseX;
+      let dy = t.clientY - stick.baseY;
+      const len = Math.hypot(dx, dy);
+      if (len > stick.maxR) { dx = dx / len * stick.maxR; dy = dy / len * stick.maxR; }
+      stick.dx = dx / stick.maxR;
+      stick.dy = dy / stick.maxR;
+    }
+  }
+}, { passive: false });
+
+function endTouch(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (stick.active && t.identifier === stick.touchId) {
+      stick.active = false;
+      stick.touchId = null;
+      stick.dx = 0; stick.dy = 0;
+    }
+  }
+}
+canvas.addEventListener('touchend', endTouch, { passive: false });
+canvas.addEventListener('touchcancel', endTouch, { passive: false });
+
+// PCクリック → パス
+canvas.addEventListener('mousedown', e => handleTap(e.clientX, e.clientY));
+
+function handleTap(sx, sy) {
+  if (ball.owner !== userPlayer) return;  // 自分がボールを持っている時だけ
+  const [fx, fy] = toField(sx, sy);
+  // タップ位置に近い味方を探す
+  let best = null, bestD = TAP_RADIUS;
+  for (const p of players) {
+    if (p === userPlayer) continue;
+    const d = Math.hypot(p.x - fx, p.y - fy);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  if (best) passBall(userPlayer, best);
+}
+
+// ---------- パス ----------
+function passBall(from, to) {
+  // 受け手の少し先を狙う(動きに合わせたリードパス)
+  const lead = 0.25;
+  const tx = to.x + to.vx * lead;
+  const ty = to.y + to.vy * lead;
+  const dx = tx - ball.x, dy = ty - ball.y;
+  const len = Math.hypot(dx, dy) || 1;
+  ball.vx = dx / len * PASS_SPEED;
+  ball.vy = dy / len * PASS_SPEED;
+  ball.owner = null;
+  ball.lastKicker = from;
+  ball.kickCooldown = KICK_COOLDOWN;
+  ball.receiver = to;
+  from.fx = dx / len; from.fy = dy / len;
+}
+
+function giveBall(p) {
+  ball.owner = p;
+  ball.vx = 0; ball.vy = 0;
+  ball.receiver = null;
+  if (!p.isUser) {
+    p.holdTimer = 0;
+    p.holdLimit = 0.9 + Math.random() * 0.9;  // 少し持ってからパス
+  }
+}
+
+// ---------- AI ----------
+function updateAI(p, dt) {
+  let tx = p.x, ty = p.y;
+
+  if (ball.owner === p) {
+    // ボール保持中: 少し前(ゴール方向)へ運びながら、時間が来たらパス
+    p.holdTimer += dt;
+    tx = p.x; ty = p.y - 1.5;
+    if (p.holdTimer >= p.holdLimit) {
+      const targets = players.filter(q => q !== p);
+      const to = targets[Math.floor(Math.random() * targets.length)];
+      passBall(p, to);
+    }
+  } else if (ball.receiver === p && !ball.owner) {
+    // 自分あてのパス: ボールを迎えに行く
+    tx = ball.x + ball.vx * 0.2;
+    ty = ball.y + ball.vy * 0.2;
+  } else if (!ball.owner && !ball.receiver) {
+    // フリーボール: いちばん近いAIが拾いに行く
+    let nearest = null, nd = Infinity;
+    for (const q of players) {
+      if (q.isUser) continue;
+      const d = Math.hypot(ball.x - q.x, ball.y - q.y);
+      if (d < nd) { nd = d; nearest = q; }
+    }
+    if (nearest === p) { tx = ball.x; ty = ball.y; }
+    else { [tx, ty] = supportSpot(p); }
+  } else {
+    // だれかが持っている: サポートポジションへ
+    [tx, ty] = supportSpot(p);
+  }
+
+  // 目標地点へ移動(近づいたら減速)
+  const dx = tx - p.x, dy = ty - p.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist > 0.15) {
+    const speed = Math.min(AI_SPEED, dist * 3.0);
+    p.vx = dx / dist * speed;
+    p.vy = dy / dist * speed;
+    p.fx = dx / dist; p.fy = dy / dist;
+  } else {
+    p.vx = 0; p.vy = 0;
+  }
+}
+
+function supportSpot(p) {
+  // ボールを基準に左右へ開いて、少しゴール寄りに構える
+  const ai = players.filter(q => !q.isUser);
+  const idx = ai.indexOf(p);
+  const side = idx === 0 ? -1 : 1;
+  let tx = ball.x + side * 5.5;
+  let ty = ball.y - 4.5;
+  const m = 1.5;
+  tx = Math.max(m, Math.min(FIELD.w - m, tx));
+  ty = Math.max(m, Math.min(FIELD.h - m, ty));
+  return [tx, ty];
+}
+
+// ---------- 更新 ----------
+function update(dt) {
+  // プレイヤー入力
+  let ix = 0, iy = 0;
+  if (keys['ArrowLeft']  || keys['a'] || keys['A']) ix -= 1;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) ix += 1;
+  if (keys['ArrowUp']    || keys['w'] || keys['W']) iy -= 1;
+  if (keys['ArrowDown']  || keys['s'] || keys['S']) iy += 1;
+  if (stick.active) { ix += stick.dx; iy += stick.dy; }
+  if (tilt.enabled && tilt.beta0 !== null) {
+    ix += tiltAxis(tilt.gamma - tilt.gamma0);  // 左右のかたむき
+    iy += tiltAxis(tilt.beta - tilt.beta0);    // 前後のかたむき(奥にたおす=上へ)
+  }
+
+  const ilen = Math.hypot(ix, iy);
+  if (ilen > 0.01) {
+    const n = Math.min(1, ilen);
+    userPlayer.vx = ix / ilen * PLAYER_SPEED * n;
+    userPlayer.vy = iy / ilen * PLAYER_SPEED * n;
+    userPlayer.fx = ix / ilen; userPlayer.fy = iy / ilen;
+  } else {
+    userPlayer.vx = 0; userPlayer.vy = 0;
+  }
+
+  // AI
+  for (const p of players) {
+    if (!p.isUser) updateAI(p, dt);
+  }
+
+  // 選手の移動 + フィールド内にとどめる
+  for (const p of players) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.x = Math.max(p.radius, Math.min(FIELD.w - p.radius, p.x));
+    p.y = Math.max(p.radius, Math.min(FIELD.h - p.radius, p.y));
+  }
+
+  // ボール
+  if (ball.kickCooldown > 0) ball.kickCooldown -= dt;
+
+  if (ball.owner) {
+    // ドリブル: 持ち主の少し前に付ける
+    const o = ball.owner;
+    ball.x = o.x + o.fx * 0.75;
+    ball.y = o.y + o.fy * 0.75;
+    ball.vx = 0; ball.vy = 0;
+  } else {
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
+    // 摩擦
+    const damp = Math.pow(0.35, dt);
+    ball.vx *= damp;
+    ball.vy *= damp;
+    // 壁で軽くバウンド(Phase 1はアウトオブバウンズなし)
+    if (ball.x < ball.radius)           { ball.x = ball.radius;           ball.vx *= -0.6; }
+    if (ball.x > FIELD.w - ball.radius) { ball.x = FIELD.w - ball.radius; ball.vx *= -0.6; }
+    if (ball.y < ball.radius)           { ball.y = ball.radius;           ball.vy *= -0.6; }
+    if (ball.y > FIELD.h - ball.radius) { ball.y = FIELD.h - ball.radius; ball.vy *= -0.6; }
+
+    // ボールを拾う判定
+    for (const p of players) {
+      if (p === ball.lastKicker && ball.kickCooldown > 0) continue;
+      const d = Math.hypot(ball.x - p.x, ball.y - p.y);
+      if (d < CAPTURE_DIST) { giveBall(p); break; }
+    }
+  }
+}
+
+// ---------- 描画 ----------
+function drawField() {
+  const cw = window.innerWidth, ch = window.innerHeight;
+
+  // 背景(フィールド外)
+  ctx.fillStyle = '#15571f';
+  ctx.fillRect(0, 0, cw, ch);
+
+  const [x0, y0] = toScreen(0, 0);
+  const [x1, y1] = toScreen(FIELD.w, FIELD.h);
+  const s = view.scale;
+
+  // 芝生ストライプ
+  const stripes = 8;
+  for (let i = 0; i < stripes; i++) {
+    ctx.fillStyle = i % 2 === 0 ? '#2e9e44' : '#28903c';
+    const sy = y0 + (y1 - y0) * (i / stripes);
+    const sh = (y1 - y0) / stripes;
+    ctx.fillRect(x0, sy, x1 - x0, sh + 1);
+  }
+
+  // ライン
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = Math.max(2, s * 0.08);
+  ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+
+  // ハーフウェーライン + センターサークル
+  const [, hy] = toScreen(0, FIELD.h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x0, hy);
+  ctx.lineTo(x1, hy);
+  ctx.stroke();
+  const [ccx, ccy] = toScreen(FIELD.w / 2, FIELD.h / 2);
+  ctx.beginPath();
+  ctx.arc(ccx, ccy, 3 * s, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // ペナルティエリア(上=ゴール側)
+  const paW = 12, paH = 5;
+  const [pax, pay] = toScreen((FIELD.w - paW) / 2, 0);
+  ctx.strokeRect(pax, pay, paW * s, paH * s);
+
+  // ゴール(上のライン外側)
+  const [gx, gy] = toScreen((FIELD.w - FIELD.goalW) / 2, 0);
+  const goalDepth = 1.1 * s;
+  ctx.fillStyle = '#f5f5f5';
+  ctx.fillRect(gx, gy - goalDepth, FIELD.goalW * s, goalDepth);
+  ctx.strokeStyle = '#cccccc';
+  ctx.lineWidth = 1.5;
+  // ネットっぽい縦線
+  for (let i = 1; i < 8; i++) {
+    const nx = gx + FIELD.goalW * s * (i / 8);
+    ctx.beginPath();
+    ctx.moveTo(nx, gy - goalDepth);
+    ctx.lineTo(nx, gy);
+    ctx.stroke();
+  }
+}
+
+function drawPlayer(p) {
+  const [sx, sy] = toScreen(p.x, p.y);
+  const r = p.radius * view.scale;
+
+  // 影
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy + r * 0.55, r * 0.9, r * 0.4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ボール保持者の黄色いリング
+  if (ball.owner === p) {
+    ctx.strokeStyle = '#ffe14d';
+    ctx.lineWidth = Math.max(2.5, r * 0.22);
+    ctx.beginPath();
+    ctx.arc(sx, sy, r * 1.45, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // 自分がボール保持中 → 味方に「パスできるよ」の点滅リング
+  if (ball.owner === userPlayer && !p.isUser) {
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
+    ctx.strokeStyle = `rgba(255,255,255,${0.35 + 0.45 * pulse})`;
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([6, 5]);
+    ctx.beginPath();
+    ctx.arc(sx, sy, r * (1.7 + 0.25 * pulse), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // からだ
+  ctx.fillStyle = p.isUser ? '#a44dff' : '#2f7bff';
+  ctx.strokeStyle = p.isUser ? '#6a1fc4' : '#1a4fb0';
+  ctx.lineWidth = Math.max(2, r * 0.18);
+  ctx.beginPath();
+  ctx.arc(sx, sy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // 向きのしるし
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(sx + p.fx * r * 0.55, sy + p.fy * r * 0.55, r * 0.28, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 「じぶん」ラベル
+  if (p.isUser) {
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `bold ${Math.max(11, view.scale * 0.55)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText('じぶん', sx, sy - r * 2.0);
+  }
+}
+
+function drawBall() {
+  const [sx, sy] = toScreen(ball.x, ball.y);
+  const r = Math.max(4, ball.radius * view.scale);
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy + r * 0.7, r * 0.9, r * 0.4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#333333';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(sx, sy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  // 模様
+  ctx.fillStyle = '#333333';
+  ctx.beginPath();
+  ctx.arc(sx, sy, r * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawStick() {
+  if (!IS_TOUCH || tilt.enabled) return;
+  const [hx, hy] = stickHome();
+  const bx = stick.active ? stick.baseX : hx;
+  const by = stick.active ? stick.baseY : hy;
+
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.beginPath();
+  ctx.arc(bx, by, stick.maxR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.beginPath();
+  ctx.arc(bx + stick.dx * stick.maxR, by + stick.dy * stick.maxR, 26, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawHUD() {
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  const w = Math.min(window.innerWidth - 20, 560);
+  ctx.beginPath();
+  ctx.roundRect((window.innerWidth - w) / 2, 8, w, 54, 10);
+  ctx.fill();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 15px sans-serif';
+  ctx.fillText('サッカーあたまトレーニング (Phase 1)', window.innerWidth / 2, 30);
+  ctx.font = '13px sans-serif';
+  let hint;
+  if (!IS_TOUCH) {
+    hint = 'やじるしキー か WASD でいどう / ボールをもったら みかたをクリックでパス';
+  } else if (tilt.enabled) {
+    hint = 'スマホを かたむけて いどう / ボールをもったら みかたをタップでパス';
+  } else {
+    hint = 'ひだりしたのスティックでいどう / ボールをもったら みかたをタップでパス';
+  }
+  ctx.fillText(hint, window.innerWidth / 2, 50);
+
+  drawTiltButton();
+  drawToast();
+}
+
+function drawTiltButton() {
+  if (!tilt.supported) return;
+  const [bx, by, bw, bh] = tiltButtonRect();
+  ctx.fillStyle = tilt.enabled ? 'rgba(255,225,77,0.92)' : 'rgba(0,0,0,0.45)';
+  ctx.beginPath();
+  ctx.roundRect(bx, by, bw, bh, 10);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = tilt.enabled ? '#553c00' : '#ffffff';
+  ctx.font = 'bold 13px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(tilt.enabled ? 'そうさ: かたむき' : 'そうさ: スティック', bx + bw / 2, by + bh / 2 + 5);
+}
+
+function drawToast() {
+  if (!toast) return;
+  if (performance.now() > toast.until) { toast = null; return; }
+  ctx.font = 'bold 14px sans-serif';
+  const tw = ctx.measureText(toast.text).width + 30;
+  const th = 36;
+  const tx = (window.innerWidth - tw) / 2;
+  const ty = window.innerHeight * 0.22;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.beginPath();
+  ctx.roundRect(tx, ty, tw, th, 10);
+  ctx.fill();
+  ctx.fillStyle = '#ffe14d';
+  ctx.textAlign = 'center';
+  ctx.fillText(toast.text, window.innerWidth / 2, ty + 24);
+}
+
+function draw() {
+  drawField();
+  drawBall();
+  // 下にいる選手を手前に描く
+  const sorted = [...players].sort((a, b) => a.y - b.y);
+  for (const p of sorted) drawPlayer(p);
+  if (ball.owner) drawBall();  // 保持中はボールを選手より手前に
+  drawStick();
+  drawHUD();
+}
+
+// ---------- ゲームループ ----------
+let lastTime = performance.now();
+function loop(now) {
+  let dt = (now - lastTime) / 1000;
+  lastTime = now;
+  dt = Math.min(dt, 0.05);  // タブ復帰時などの大ジャンプを防ぐ
+
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
