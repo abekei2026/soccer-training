@@ -550,22 +550,22 @@ function handleTap(sx, sy) {
 
   if (MATCH.mode === 'versus') {
     if (MATCH.state !== 'play') return;
-    if (MATCH.attacker !== 'blue' || ball.owner !== userPlayer) return;
+    if (MATCH.attacker !== 'blue' || ball.owner !== controlledPlayer) return;
     const [fx, fy] = toField(sx, sy);
     const goalCx = FIELD.w / 2;
     if (fy < 3.0 && Math.abs(fx - goalCx) < FIELD.goalW / 2 + 1.5) {
       const aimX = Math.max(goalCx - FIELD.goalW / 2 + 0.4,
                    Math.min(goalCx + FIELD.goalW / 2 - 0.4, fx));
-      versusShoot(userPlayer, aimX, 0);
+      versusShoot(controlledPlayer, aimX, 0);
       return;
     }
     let vBest = null, vBestD = TAP_RADIUS;
     for (const p of players) {
-      if (p === userPlayer) continue;
+      if (p === controlledPlayer) continue;
       const d = Math.hypot(p.x - fx, p.y - fy);
       if (d < vBestD) { vBestD = d; vBest = p; }
     }
-    if (vBest) versusPass(userPlayer, vBest);
+    if (vBest) versusPass(controlledPlayer, vBest);
     return;
   }
 
@@ -800,18 +800,34 @@ function versusShoot(from, aimX, goalY) {
   sfxShoot();
 }
 
+// ボールを持っている人を操作できるように、青選手が保持したら操作対象を切り替える
+// (青GKは操作対象にしない。ユーザーは常にフィールドプレーヤーを操作する)
+function maybeSwitchControlToBallOwner(p) {
+  if (p.team === 'blue' && !p.isGK) controlledPlayer = p;
+}
+
 function versusGiveBall(p) {
   const wasAttacker = p.team === MATCH.attacker;
+
+  if (!wasAttacker && p.isGK) {
+    // キーパーがキャッチ: 試合を止めて攻守交代・仕切り直し
+    versusTurnover(p.team, 'キーパーが キャッチ!');
+    return;
+  }
+
   ball.owner = p;
   ball.vx = 0; ball.vy = 0;
   ball.receiver = null;
-  if (p !== userPlayer) {
+  if (p !== controlledPlayer) {
     p.holdTimer = 0;
     p.holdLimit = 0.9 + Math.random() * 0.9;
   }
+  maybeSwitchControlToBallOwner(p);
+
   if (!wasAttacker) {
+    // フィールドプレーヤーのインターセプト: 止めずにそのまま攻守交代して続行
     MATCH.attacker = p.team;
-    showToast(p.isGK ? 'キーパーが キャッチ!' : (p.team === 'blue' ? 'こうげき スタート!' : 'あいての こうげき!'));
+    showToast(p.team === 'blue' ? 'こうげき スタート!' : 'あいての こうげき!');
     sfxLost();
   } else {
     sfxPass();
@@ -876,7 +892,8 @@ function versusFormation(attacker) {
   ball.owner = kicker;
   ball.receiver = null;
   ball.vx = 0; ball.vy = 0;
-  if (kicker !== userPlayer) {
+  if (kicker.team === 'blue') controlledPlayer = kicker;
+  if (kicker !== controlledPlayer) {
     kicker.holdTimer = 0;
     kicker.holdLimit = 0.9 + Math.random() * 0.9;
   }
@@ -884,7 +901,7 @@ function versusFormation(attacker) {
 }
 
 function versusSupportSpot(p, team) {
-  const mates = teamOutfield(team).filter(q => q !== userPlayer);
+  const mates = teamOutfield(team).filter(q => q !== controlledPlayer);
   const idx = mates.indexOf(p);
   const side = idx === 0 ? -1 : 1;
   const dir = team === 'blue' ? -1 : 1;
@@ -923,7 +940,7 @@ function versusAttackAI(p, dt, team) {
   } else if (!ball.owner && !ball.receiver) {
     let nearest = null, nd = Infinity;
     for (const q of mates) {
-      if (q === userPlayer) continue;
+      if (q === controlledPlayer) continue;
       const d = Math.hypot(ball.x - q.x, ball.y - q.y);
       if (d < nd) { nd = d; nearest = q; }
     }
@@ -936,7 +953,7 @@ function versusAttackAI(p, dt, team) {
 }
 
 function versusDefendAI(p, dt, team) {
-  const mates = teamOutfield(team).filter(q => q !== userPlayer);
+  const mates = teamOutfield(team).filter(q => q !== controlledPlayer);
   let amClosest = true;
   const myDist = Math.hypot(ball.x - p.x, ball.y - p.y);
   for (const q of mates) {
@@ -1009,7 +1026,7 @@ function updateVersus(dt) {
     return;
   }
 
-  // ユーザー入力(たいせんモードでは常にuserPlayerを直接操作)
+  // ユーザー入力(ボールを持っている青選手を直接操作する)
   let ix = 0, iy = 0;
   if (keys['ArrowLeft']  || keys['a'] || keys['A']) ix -= 1;
   if (keys['ArrowRight'] || keys['d'] || keys['D']) ix += 1;
@@ -1023,16 +1040,16 @@ function updateVersus(dt) {
   const ilen = Math.hypot(ix, iy);
   if (ilen > 0.01) {
     const n = Math.min(1, ilen);
-    userPlayer.vx = ix / ilen * PLAYER_SPEED * n;
-    userPlayer.vy = iy / ilen * PLAYER_SPEED * n;
-    userPlayer.fx = ix / ilen; userPlayer.fy = iy / ilen;
+    controlledPlayer.vx = ix / ilen * PLAYER_SPEED * n;
+    controlledPlayer.vy = iy / ilen * PLAYER_SPEED * n;
+    controlledPlayer.fx = ix / ilen; controlledPlayer.fy = iy / ilen;
   } else {
-    userPlayer.vx = 0; userPlayer.vy = 0;
+    controlledPlayer.vx = 0; controlledPlayer.vy = 0;
   }
 
-  // 青チームAI(ユーザー以外)
+  // 青チームAI(操作中の選手以外)
   for (const p of players) {
-    if (p === userPlayer) continue;
+    if (p === controlledPlayer) continue;
     if (MATCH.attacker === 'blue') versusAttackAI(p, dt, 'blue');
     else versusDefendAI(p, dt, 'blue');
   }
@@ -1073,7 +1090,22 @@ function updateVersus(dt) {
       if (d === o) continue;
       const dist = Math.hypot(ball.x - d.x, ball.y - d.y);
       if (dist < STEAL_DIST) {
-        versusTurnover(defTeam, d.isGK ? 'キーパーが キャッチ!' : 'とられた!');
+        if (d.isGK) {
+          // キーパーがキャッチ: 試合を止めて攻守交代・仕切り直し
+          versusTurnover(defTeam, 'キーパーが キャッチ!');
+        } else {
+          // フィールドプレーヤーが奪う: 止めずにそのまま攻守交代して続行
+          MATCH.attacker = defTeam;
+          ball.owner = d;
+          ball.receiver = null;
+          if (d !== controlledPlayer) {
+            d.holdTimer = 0;
+            d.holdLimit = 0.9 + Math.random() * 0.9;
+          }
+          maybeSwitchControlToBallOwner(d);
+          showToast(defTeam === 'blue' ? 'こうげき スタート!' : 'あいての こうげき!');
+          sfxLost();
+        }
         return;
       }
     }
@@ -1602,7 +1634,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v12)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v13)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
