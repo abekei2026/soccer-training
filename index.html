@@ -51,6 +51,12 @@ const DF_SPEED       = 3.5;   // 敵DFの速度(プレイヤーより遅め)
 const GK_SPEED       = 4.5;   // ゴールキーパーの速度
 const STEAL_DIST     = 0.6;   // 敵がボールを奪える距離
 const INTERCEPT_DIST = 0.7;   // 敵がフリーボール/パスをカットできる距離
+const JUDGE_TIME      = 5.0;  // 判断タイム(スローモーション)の長さ(秒)
+const SLOWMO_SCALE    = 0.35; // 判断タイム中の時間の流れる速さ
+const LANE_RISK_DIST  = 1.4;  // パスコース上でこの距離より敵が近いと「あぶない」判定
+const SPACE_THRESHOLD = 3.5;  // これより敵が遠ければ「スペースで受けた」判定
+const HINT_COOLDOWN     = 15000; // ヒント表示の最短間隔(ミリ秒)
+const NICE_RUN_COOLDOWN = 3000;  // 「ナイスラン!」の最短間隔(ミリ秒)
 
 const IS_TOUCH = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
 
@@ -130,6 +136,15 @@ const game = {
   sub: ''
 };
 
+// 判断タイム(スローモーション)の状態
+const judge = {
+  enabled: true,   // ON/OFFの切り替え(慣れたらOFFで実力試し)
+  active: false,
+  timer: 0
+};
+let lastNiceRunAt = -Infinity;
+let lastHintAt = -Infinity;
+
 const ball = {
   x: FIELD.w * 0.25, y: FIELD.h * 0.5,
   vx: 0, vy: 0,
@@ -137,7 +152,8 @@ const ball = {
   owner: players[1],       // 最初は味方AIが持つ(パス回しがすぐ見える)
   lastKicker: null,
   kickCooldown: 0,
-  receiver: null           // パスを受ける予定の選手
+  receiver: null,          // パスを受ける予定の選手
+  trackedPass: null        // プレイヤーが出したパスの結果を見るための記録
 };
 
 // ---------- 入力 ----------
@@ -300,7 +316,24 @@ canvas.addEventListener('touchcancel', e => endTouch(e, true), { passive: false 
 // PCクリック → パス
 canvas.addEventListener('mousedown', e => handleTap(e.clientX, e.clientY));
 
+function judgeButtonRect() {
+  // スコア表示のすぐ下
+  return [10, 114, 150, 36];
+}
+
+function inJudgeButton(x, y) {
+  const [bx, by, bw, bh] = judgeButtonRect();
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+
+function toggleJudge() {
+  judge.enabled = !judge.enabled;
+  if (!judge.enabled) judge.active = false;
+  showToast(judge.enabled ? 'はんだんタイム ON' : 'はんだんタイム OFF (じつりょくコース)');
+}
+
 function handleTap(sx, sy) {
+  if (inJudgeButton(sx, sy)) { toggleJudge(); return; }
   if (game.state !== 'play') return;
   if (ball.owner !== userPlayer) return;  // 自分がボールを持っている時だけ
   const [fx, fy] = toField(sx, sy);
@@ -338,10 +371,27 @@ function passBall(from, to) {
   ball.lastKicker = from;
   ball.kickCooldown = KICK_COOLDOWN;
   ball.receiver = to;
+  ball.trackedPass = (from === userPlayer) ? { receiver: to } : null;
   from.fx = dx / len; from.fy = dy / len;
+  if (from === userPlayer) judge.active = false;  // パスした=判断完了
+}
+
+// パスコース上のリスク判定: 敵がライン上に近いほど「あぶない」
+function laneIsRisky(from, to) {
+  const abx = to.x - from.x, aby = to.y - from.y;
+  const abLen2 = abx * abx + aby * aby || 1;
+  for (const d of defenders) {
+    const apx = d.x - from.x, apy = d.y - from.y;
+    let t = (apx * abx + apy * aby) / abLen2;
+    t = Math.max(0, Math.min(1, t));
+    const cx = from.x + abx * t, cy = from.y + aby * t;
+    if (t > 0.08 && t < 0.97 && Math.hypot(d.x - cx, d.y - cy) < LANE_RISK_DIST) return true;
+  }
+  return false;
 }
 
 function giveBall(p) {
+  const wasTargetedPass = ball.receiver === p;
   ball.owner = p;
   ball.vx = 0; ball.vy = 0;
   ball.receiver = null;
@@ -349,6 +399,28 @@ function giveBall(p) {
   if (!p.isUser) {
     p.holdTimer = 0;
     p.holdLimit = 0.9 + Math.random() * 0.9;  // 少し持ってからパス
+  }
+
+  // 即時フィードバック
+  if (wasTargetedPass) {
+    if (ball.trackedPass && ball.trackedPass.receiver === p) {
+      showToast('いいパス!');
+      ball.trackedPass = null;
+    }
+    if (p.team === 'blue') {
+      const nearestDefDist = Math.min(...defenders.map(d => Math.hypot(p.x - d.x, p.y - d.y)));
+      const now = performance.now();
+      if (nearestDefDist > SPACE_THRESHOLD && now - lastNiceRunAt > NICE_RUN_COOLDOWN) {
+        showToast('ナイスラン!');
+        lastNiceRunAt = now;
+      }
+    }
+  }
+
+  // プレイヤーがボールを持ったら判断タイム開始
+  if (p === userPlayer && judge.enabled) {
+    judge.active = true;
+    judge.timer = JUDGE_TIME;
   }
 }
 
@@ -361,8 +433,10 @@ function shootBall(from, aimX) {
   ball.lastKicker = from;
   ball.kickCooldown = KICK_COOLDOWN;
   ball.receiver = null;
+  ball.trackedPass = null;
   ball.isShot = true;
   from.fx = dx / len; from.fy = dy / len;
+  if (from === userPlayer) judge.active = false;  // シュートした=判断完了
 }
 
 // ---------- ゴール / ボールロスト / リスタート ----------
@@ -373,6 +447,7 @@ function onGoal() {
   game.message = 'ゴーール!';
   game.sub = 'キックオフから さいかい';
   ball.vx = 0; ball.vy = 0;
+  judge.active = false;
 }
 
 function loseBall(type) {
@@ -388,8 +463,10 @@ function loseBall(type) {
   game.sub = 'バックラインから さいかい';
   ball.owner = null;
   ball.receiver = null;
+  ball.trackedPass = null;
   ball.isShot = false;
   ball.vx = 0; ball.vy = 0;
+  judge.active = false;
 }
 
 function resetDefense() {
@@ -758,6 +835,77 @@ function drawPlayer(p) {
   }
 }
 
+function drawPassLanes() {
+  if (ball.owner !== userPlayer) return;
+  const [ux, uy] = toScreen(userPlayer.x, userPlayer.y);
+  const alpha = judge.active ? 0.95 : 0.5;
+  for (const p of players) {
+    if (p === userPlayer) continue;
+    const risky = laneIsRisky(userPlayer, p);
+    const [sx, sy] = toScreen(p.x, p.y);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = judge.active ? 4 : 3;
+    if (risky) {
+      ctx.strokeStyle = '#ff5c5c';
+      ctx.setLineDash([9, 7]);
+    } else {
+      ctx.strokeStyle = '#4ade80';
+      ctx.setLineDash([]);
+    }
+    ctx.beginPath();
+    ctx.moveTo(ux, uy);
+    ctx.lineTo(sx, sy);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawSlowMoOverlay() {
+  if (!judge.active) return;
+  ctx.fillStyle = 'rgba(40,90,200,0.08)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+}
+
+function drawJudgeTimer() {
+  if (!judge.active) return;
+  const [sx, sy] = toScreen(userPlayer.x, userPlayer.y);
+  const r = userPlayer.radius * view.scale;
+  const frac = judge.timer / JUDGE_TIME;
+
+  ctx.save();
+  ctx.strokeStyle = '#ffe14d';
+  ctx.lineWidth = Math.max(3, r * 0.25);
+  ctx.beginPath();
+  ctx.arc(sx, sy, r * 2.1, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  const label = 'はんだんタイム ' + Math.ceil(judge.timer);
+  ctx.strokeText(label, window.innerWidth / 2, window.innerHeight * 0.14);
+  ctx.fillStyle = '#ffe14d';
+  ctx.fillText(label, window.innerWidth / 2, window.innerHeight * 0.14);
+}
+
+function drawJudgeButton() {
+  const [bx, by, bw, bh] = judgeButtonRect();
+  ctx.fillStyle = judge.enabled ? 'rgba(255,225,77,0.92)' : 'rgba(0,0,0,0.45)';
+  ctx.beginPath();
+  ctx.roundRect(bx, by, bw, bh, 10);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = judge.enabled ? '#553c00' : '#ffffff';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(judge.enabled ? 'はんだんタイム: ON' : 'はんだんタイム: OFF', bx + bw / 2, by + bh / 2 + 4);
+}
+
 function drawBall() {
   const [sx, sy] = toScreen(ball.x, ball.y);
   const r = Math.max(4, ball.radius * view.scale);
@@ -810,7 +958,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 2 / v5)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 3 / v6)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -890,30 +1038,56 @@ function drawScore() {
   ctx.font = 'bold 16px sans-serif';
   ctx.textAlign = 'left';
   ctx.fillText('ゴール ' + game.score, 24, 95);
+
+  drawJudgeButton();
 }
 
 function draw() {
   drawField();
+  drawPassLanes();
   drawBall();
   // 下にいる選手を手前に描く
   const sorted = [...everyone].sort((a, b) => a.y - b.y);
   for (const p of sorted) drawPlayer(p);
   if (ball.owner) drawBall();  // 保持中はボールを選手より手前に
+  drawSlowMoOverlay();
   drawStick();
   drawHUD();
   drawScore();
+  drawJudgeTimer();
   drawCenterMessage();
+}
+
+// 判断タイムの終了時、開いていたコースを使わなかったらヒントを出す(頻度は控えめ)
+function maybeShowOpenLaneHint() {
+  if (!judge.enabled || ball.owner !== userPlayer) return;
+  const now = performance.now();
+  if (now - lastHintAt < HINT_COOLDOWN) return;
+  const hasOpenLane = players.some(p => p !== userPlayer && !laneIsRisky(userPlayer, p));
+  if (hasOpenLane) {
+    showToast('そこ あいてたよ!');
+    lastHintAt = now;
+  }
 }
 
 // ---------- ゲームループ ----------
 setupKickoff();
 let lastTime = performance.now();
 function loop(now) {
-  let dt = (now - lastTime) / 1000;
+  let rawDt = (now - lastTime) / 1000;
   lastTime = now;
-  dt = Math.min(dt, 0.05);  // タブ復帰時などの大ジャンプを防ぐ
+  rawDt = Math.min(rawDt, 0.05);  // タブ復帰時などの大ジャンプを防ぐ
 
-  update(dt);
+  if (judge.active) {
+    judge.timer -= rawDt;
+    if (judge.timer <= 0) {
+      judge.timer = 0;
+      judge.active = false;
+      maybeShowOpenLaneHint();
+    }
+  }
+
+  update(rawDt * (judge.active ? SLOWMO_SCALE : 1));
   draw();
   requestAnimationFrame(loop);
 }
