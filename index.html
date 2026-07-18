@@ -119,6 +119,10 @@ const players = [
 ];
 const userPlayer = players[0];
 
+// そうさモード: 'fixed'=いつも同じ選手 / followBall有効時はボールを持っている人を自動操作
+const control = { followBall: false };
+let controlledPlayer = userPlayer;
+
 const defenders = [
   makeDefender(10, FIELD.w * 0.3, 11, false),  // 敵DF(あか)
   makeDefender(11, FIELD.w * 0.7, 11, false),  // 敵DF(あか)
@@ -332,10 +336,33 @@ function toggleJudge() {
   showToast(judge.enabled ? 'はんだんタイム ON' : 'はんだんタイム OFF (じつりょくコース)');
 }
 
+function controlButtonRect() {
+  // 判断タイムボタンのすぐ下
+  return [10, 156, 150, 36];
+}
+
+function inControlButton(x, y) {
+  const [bx, by, bw, bh] = controlButtonRect();
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+
+function toggleControlMode() {
+  control.followBall = !control.followBall;
+  if (control.followBall) {
+    // ONにした瞬間、ボールを持っている味方がいればその人に操作をわたす
+    if (ball.owner && ball.owner.team === 'blue') controlledPlayer = ball.owner;
+    showToast('ボールをもつ人を そうさするよ!');
+  } else {
+    controlledPlayer = userPlayer;
+    showToast('いつもの せんしゅを そうさするよ');
+  }
+}
+
 function handleTap(sx, sy) {
   if (inJudgeButton(sx, sy)) { toggleJudge(); return; }
+  if (inControlButton(sx, sy)) { toggleControlMode(); return; }
   if (game.state !== 'play') return;
-  if (ball.owner !== userPlayer) return;  // 自分がボールを持っている時だけ
+  if (ball.owner !== controlledPlayer) return;  // 自分がボールを持っている時だけ
   const [fx, fy] = toField(sx, sy);
 
   // ゴールのあたりをタップ → シュート(タップした位置をねらう)
@@ -343,18 +370,18 @@ function handleTap(sx, sy) {
   if (fy < 3.0 && Math.abs(fx - goalCx) < FIELD.goalW / 2 + 1.5) {
     const aimX = Math.max(goalCx - FIELD.goalW / 2 + 0.4,
                  Math.min(goalCx + FIELD.goalW / 2 - 0.4, fx));
-    shootBall(userPlayer, aimX);
+    shootBall(controlledPlayer, aimX);
     return;
   }
 
   // タップ位置に近い味方を探す
   let best = null, bestD = TAP_RADIUS;
   for (const p of players) {
-    if (p === userPlayer) continue;
+    if (p === controlledPlayer) continue;
     const d = Math.hypot(p.x - fx, p.y - fy);
     if (d < bestD) { bestD = d; best = p; }
   }
-  if (best) passBall(userPlayer, best);
+  if (best) passBall(controlledPlayer, best);
 }
 
 // ---------- パス ----------
@@ -371,9 +398,9 @@ function passBall(from, to) {
   ball.lastKicker = from;
   ball.kickCooldown = KICK_COOLDOWN;
   ball.receiver = to;
-  ball.trackedPass = (from === userPlayer) ? { receiver: to } : null;
+  ball.trackedPass = (from === controlledPlayer) ? { receiver: to } : null;
   from.fx = dx / len; from.fy = dy / len;
-  if (from === userPlayer) judge.active = false;  // パスした=判断完了
+  if (from === controlledPlayer) judge.active = false;  // パスした=判断完了
 }
 
 // パスコース上のリスク判定: 敵がライン上に近いほど「あぶない」
@@ -396,7 +423,13 @@ function giveBall(p) {
   ball.vx = 0; ball.vy = 0;
   ball.receiver = null;
   ball.isShot = false;
-  if (!p.isUser) {
+
+  // ボールをもつ人を操作するモード: 受け取った人に操作をわたす
+  if (control.followBall && p.team === 'blue') {
+    controlledPlayer = p;
+  }
+
+  if (p !== controlledPlayer) {
     p.holdTimer = 0;
     p.holdLimit = 0.9 + Math.random() * 0.9;  // 少し持ってからパス
   }
@@ -418,7 +451,7 @@ function giveBall(p) {
   }
 
   // プレイヤーがボールを持ったら判断タイム開始
-  if (p === userPlayer && judge.enabled) {
+  if (p === controlledPlayer && judge.enabled) {
     judge.active = true;
     judge.timer = JUDGE_TIME;
   }
@@ -436,7 +469,7 @@ function shootBall(from, aimX) {
   ball.trackedPass = null;
   ball.isShot = true;
   from.fx = dx / len; from.fy = dy / len;
-  if (from === userPlayer) judge.active = false;  // シュートした=判断完了
+  if (from === controlledPlayer) judge.active = false;  // シュートした=判断完了
 }
 
 // ---------- ゴール / ボールロスト / リスタート ----------
@@ -545,7 +578,7 @@ function updateAI(p, dt) {
     // フリーボール: いちばん近いAIが拾いに行く
     let nearest = null, nd = Infinity;
     for (const q of players) {
-      if (q.isUser) continue;
+      if (q === controlledPlayer) continue;
       const d = Math.hypot(ball.x - q.x, ball.y - q.y);
       if (d < nd) { nd = d; nearest = q; }
     }
@@ -593,7 +626,7 @@ function updateDefense(dt) {
 
 function supportSpot(p) {
   // ボールを基準に左右へ開いて、少しゴール寄りに構える
-  const ai = players.filter(q => !q.isUser);
+  const ai = players.filter(q => q !== controlledPlayer);
   const idx = ai.indexOf(p);
   const side = idx === 0 ? -1 : 1;
   let tx = ball.x + side * 5.5;
@@ -632,16 +665,16 @@ function update(dt) {
   const ilen = Math.hypot(ix, iy);
   if (ilen > 0.01) {
     const n = Math.min(1, ilen);
-    userPlayer.vx = ix / ilen * PLAYER_SPEED * n;
-    userPlayer.vy = iy / ilen * PLAYER_SPEED * n;
-    userPlayer.fx = ix / ilen; userPlayer.fy = iy / ilen;
+    controlledPlayer.vx = ix / ilen * PLAYER_SPEED * n;
+    controlledPlayer.vy = iy / ilen * PLAYER_SPEED * n;
+    controlledPlayer.fx = ix / ilen; controlledPlayer.fy = iy / ilen;
   } else {
-    userPlayer.vx = 0; userPlayer.vy = 0;
+    controlledPlayer.vx = 0; controlledPlayer.vy = 0;
   }
 
   // AI
   for (const p of players) {
-    if (!p.isUser) updateAI(p, dt);
+    if (p !== controlledPlayer) updateAI(p, dt);
   }
   updateDefense(dt);
 
@@ -795,7 +828,7 @@ function drawPlayer(p) {
   }
 
   // 自分がボール保持中 → 味方に「パスできるよ」の点滅リング
-  if (ball.owner === userPlayer && !p.isUser && p.team === 'blue') {
+  if (ball.owner === controlledPlayer && p !== controlledPlayer && p.team === 'blue') {
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
     ctx.strokeStyle = `rgba(255,255,255,${0.35 + 0.45 * pulse})`;
     ctx.lineWidth = 2.5;
@@ -808,7 +841,7 @@ function drawPlayer(p) {
 
   // からだ(むらさき=じぶん / あお=みかた / あか=てき / オレンジ=キーパー)
   let bodyFill, bodyStroke;
-  if (p.isUser)              { bodyFill = '#a44dff'; bodyStroke = '#6a1fc4'; }
+  if (p === controlledPlayer) { bodyFill = '#a44dff'; bodyStroke = '#6a1fc4'; }
   else if (p.isGK)           { bodyFill = '#ff9f1a'; bodyStroke = '#b86a00'; }
   else if (p.team === 'red') { bodyFill = '#ff4d4d'; bodyStroke = '#b31f1f'; }
   else                       { bodyFill = '#2f7bff'; bodyStroke = '#1a4fb0'; }
@@ -827,7 +860,7 @@ function drawPlayer(p) {
   ctx.fill();
 
   // 「じぶん」ラベル
-  if (p.isUser) {
+  if (p === controlledPlayer) {
     ctx.fillStyle = '#ffffff';
     ctx.font = `bold ${Math.max(11, view.scale * 0.55)}px sans-serif`;
     ctx.textAlign = 'center';
@@ -836,12 +869,12 @@ function drawPlayer(p) {
 }
 
 function drawPassLanes() {
-  if (ball.owner !== userPlayer) return;
-  const [ux, uy] = toScreen(userPlayer.x, userPlayer.y);
+  if (ball.owner !== controlledPlayer) return;
+  const [ux, uy] = toScreen(controlledPlayer.x, controlledPlayer.y);
   const alpha = judge.active ? 0.95 : 0.5;
   for (const p of players) {
-    if (p === userPlayer) continue;
-    const risky = laneIsRisky(userPlayer, p);
+    if (p === controlledPlayer) continue;
+    const risky = laneIsRisky(controlledPlayer, p);
     const [sx, sy] = toScreen(p.x, p.y);
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -869,8 +902,8 @@ function drawSlowMoOverlay() {
 
 function drawJudgeTimer() {
   if (!judge.active) return;
-  const [sx, sy] = toScreen(userPlayer.x, userPlayer.y);
-  const r = userPlayer.radius * view.scale;
+  const [sx, sy] = toScreen(controlledPlayer.x, controlledPlayer.y);
+  const r = controlledPlayer.radius * view.scale;
   const frac = judge.timer / JUDGE_TIME;
 
   ctx.save();
@@ -904,6 +937,21 @@ function drawJudgeButton() {
   ctx.font = 'bold 12px sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText(judge.enabled ? 'はんだんタイム: ON' : 'はんだんタイム: OFF', bx + bw / 2, by + bh / 2 + 4);
+}
+
+function drawControlButton() {
+  const [bx, by, bw, bh] = controlButtonRect();
+  ctx.fillStyle = control.followBall ? 'rgba(255,225,77,0.92)' : 'rgba(0,0,0,0.45)';
+  ctx.beginPath();
+  ctx.roundRect(bx, by, bw, bh, 10);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = control.followBall ? '#553c00' : '#ffffff';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(control.followBall ? 'そうさ: ボールの人' : 'そうさ: こていせんしゅ', bx + bw / 2, by + bh / 2 + 4);
 }
 
 function drawBall() {
@@ -958,7 +1006,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 3 / v6)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 3 / v7)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -1040,6 +1088,7 @@ function drawScore() {
   ctx.fillText('ゴール ' + game.score, 24, 95);
 
   drawJudgeButton();
+  drawControlButton();
 }
 
 function draw() {
@@ -1060,10 +1109,10 @@ function draw() {
 
 // 判断タイムの終了時、開いていたコースを使わなかったらヒントを出す(頻度は控えめ)
 function maybeShowOpenLaneHint() {
-  if (!judge.enabled || ball.owner !== userPlayer) return;
+  if (!judge.enabled || ball.owner !== controlledPlayer) return;
   const now = performance.now();
   if (now - lastHintAt < HINT_COOLDOWN) return;
-  const hasOpenLane = players.some(p => p !== userPlayer && !laneIsRisky(userPlayer, p));
+  const hasOpenLane = players.some(p => p !== controlledPlayer && !laneIsRisky(controlledPlayer, p));
   if (hasOpenLane) {
     showToast('そこ あいてたよ!');
     lastHintAt = now;
