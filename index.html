@@ -151,7 +151,8 @@ window.addEventListener('deviceorientation', e => {
 });
 
 function tiltButtonRect() {
-  return [window.innerWidth - 152, 70, 144, 42];
+  // 画面右下(左下のスティックと反対側)
+  return [window.innerWidth - 152, window.innerHeight - 60, 144, 42];
 }
 
 function inTiltButton(x, y) {
@@ -600,7 +601,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 1 / v3)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 1 / v4)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
