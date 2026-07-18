@@ -37,7 +37,7 @@ const FIELD = {
   w: 20,          // フィールド幅(m) 論理座標
   h: 32,          // フィールド高さ(m) ゴールは y=0(上)側
   goalW: 6,       // ゴール幅
-  margin: 2.2     // フィールド外周の余白(描画用)
+  margin: 0.5     // フィールド外周の余白(描画用、なるべく画面いっぱいに使う)
 };
 
 const PLAYER_SPEED   = 5.0;   // プレイヤー移動速度 m/s
@@ -79,7 +79,8 @@ function resize() {
   const fh = FIELD.h + FIELD.margin * 2;
   view.scale = Math.min(cw / fw, ch / fh);
   view.offX = (cw - FIELD.w * view.scale) / 2;
-  view.offY = (ch - FIELD.h * view.scale) / 2;
+  // 上部のHUDバー(タイトル表示)とゴールが重ならない最低限のすき間だけは確保する
+  view.offY = Math.max(66, (ch - FIELD.h * view.scale) / 2);
 }
 window.addEventListener('resize', resize);
 resize();
@@ -1157,7 +1158,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v10)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v11)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
