@@ -46,6 +46,11 @@ const PASS_SPEED     = 11.0;  // パス時のボール速度 m/s
 const CAPTURE_DIST   = 0.9;   // ボールを拾える距離
 const KICK_COOLDOWN  = 0.45;  // パス直後に自分で拾えない時間(秒)
 const TAP_RADIUS     = 3.0;   // タップでパス相手を選べる範囲(m)
+const SHOOT_SPEED    = 14.0;  // シュート時のボール速度 m/s
+const DF_SPEED       = 3.5;   // 敵DFの速度(プレイヤーより遅め)
+const GK_SPEED       = 4.5;   // ゴールキーパーの速度
+const STEAL_DIST     = 0.6;   // 敵がボールを奪える距離
+const INTERCEPT_DIST = 0.7;   // 敵がフリーボール/パスをカットできる距離
 
 const IS_TOUCH = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
 
@@ -86,10 +91,19 @@ function makePlayer(id, x, y, isUser) {
     vx: 0, vy: 0,
     fx: 0, fy: -1,        // 向いている方向
     isUser,
+    team: 'blue',
+    isGK: false,
     radius: 0.55,
     holdTimer: 0,         // AIがボールを持ってから経過した時間
     holdLimit: 0          // この時間が来たらパスする
   };
+}
+
+function makeDefender(id, x, y, isGK) {
+  const p = makePlayer(id, x, y, false);
+  p.team = 'red';
+  p.isGK = isGK;
+  return p;
 }
 
 const players = [
@@ -98,6 +112,23 @@ const players = [
   makePlayer(2, FIELD.w * 0.75, FIELD.h * 0.5, false)  // 味方AI(あお)
 ];
 const userPlayer = players[0];
+
+const defenders = [
+  makeDefender(10, FIELD.w * 0.3, 11, false),  // 敵DF(あか)
+  makeDefender(11, FIELD.w * 0.7, 11, false),  // 敵DF(あか)
+  makeDefender(12, FIELD.w * 0.5, 6.5, false), // 敵DF(あか)
+  makeDefender(13, FIELD.w * 0.5, 1.2, true)   // ゴールキーパー(オレンジ)
+];
+const everyone = [...players, ...defenders];
+
+// ゲーム進行の状態
+const game = {
+  state: 'play',   // 'play' / 'goal' / 'lost'
+  timer: 0,        // 状態が切り替わるまでの時間
+  score: 0,
+  message: '',
+  sub: ''
+};
 
 const ball = {
   x: FIELD.w * 0.25, y: FIELD.h * 0.5,
@@ -270,8 +301,19 @@ canvas.addEventListener('touchcancel', e => endTouch(e, true), { passive: false 
 canvas.addEventListener('mousedown', e => handleTap(e.clientX, e.clientY));
 
 function handleTap(sx, sy) {
+  if (game.state !== 'play') return;
   if (ball.owner !== userPlayer) return;  // 自分がボールを持っている時だけ
   const [fx, fy] = toField(sx, sy);
+
+  // ゴールのあたりをタップ → シュート(タップした位置をねらう)
+  const goalCx = FIELD.w / 2;
+  if (fy < 3.0 && Math.abs(fx - goalCx) < FIELD.goalW / 2 + 1.5) {
+    const aimX = Math.max(goalCx - FIELD.goalW / 2 + 0.4,
+                 Math.min(goalCx + FIELD.goalW / 2 - 0.4, fx));
+    shootBall(userPlayer, aimX);
+    return;
+  }
+
   // タップ位置に近い味方を探す
   let best = null, bestD = TAP_RADIUS;
   for (const p of players) {
@@ -303,9 +345,98 @@ function giveBall(p) {
   ball.owner = p;
   ball.vx = 0; ball.vy = 0;
   ball.receiver = null;
+  ball.isShot = false;
   if (!p.isUser) {
     p.holdTimer = 0;
     p.holdLimit = 0.9 + Math.random() * 0.9;  // 少し持ってからパス
+  }
+}
+
+function shootBall(from, aimX) {
+  const dx = aimX - ball.x, dy = -0.3 - ball.y;
+  const len = Math.hypot(dx, dy) || 1;
+  ball.vx = dx / len * SHOOT_SPEED;
+  ball.vy = dy / len * SHOOT_SPEED;
+  ball.owner = null;
+  ball.lastKicker = from;
+  ball.kickCooldown = KICK_COOLDOWN;
+  ball.receiver = null;
+  ball.isShot = true;
+  from.fx = dx / len; from.fy = dy / len;
+}
+
+// ---------- ゴール / ボールロスト / リスタート ----------
+function onGoal() {
+  game.score += 1;
+  game.state = 'goal';
+  game.timer = 1.8;
+  game.message = 'ゴーール!';
+  game.sub = 'キックオフから さいかい';
+  ball.vx = 0; ball.vy = 0;
+}
+
+function loseBall(type) {
+  game.state = 'lost';
+  game.timer = 1.5;
+  if (type === 'save') {
+    game.message = 'キーパーが キャッチ!';
+  } else if (type === 'miss') {
+    game.message = 'おしい! はずれた!';
+  } else {
+    game.message = 'とられた!';
+  }
+  game.sub = 'バックラインから さいかい';
+  ball.owner = null;
+  ball.receiver = null;
+  ball.isShot = false;
+  ball.vx = 0; ball.vy = 0;
+}
+
+function resetDefense() {
+  const pos = [
+    [FIELD.w * 0.3, 11],
+    [FIELD.w * 0.7, 11],
+    [FIELD.w * 0.5, 6.5],
+    [FIELD.w * 0.5, 1.2]
+  ];
+  defenders.forEach((d, i) => {
+    d.x = pos[i][0]; d.y = pos[i][1];
+    d.vx = 0; d.vy = 0; d.fx = 0; d.fy = 1;
+  });
+}
+
+function resetAttack(userX, userY, mateY) {
+  userPlayer.x = userX; userPlayer.y = userY;
+  players[1].x = FIELD.w * 0.22; players[1].y = mateY;
+  players[2].x = FIELD.w * 0.78; players[2].y = mateY;
+  for (const p of players) { p.vx = 0; p.vy = 0; p.fx = 0; p.fy = -1; }
+  ball.lastKicker = null;
+  ball.kickCooldown = 0;
+  giveBall(userPlayer);
+  ball.x = userPlayer.x; ball.y = userPlayer.y - 0.75;
+}
+
+function setupKickoff() {
+  resetDefense();
+  resetAttack(FIELD.w / 2, FIELD.h * 0.52, FIELD.h * 0.45);
+}
+
+function setupBacklineRestart() {
+  resetDefense();
+  resetAttack(FIELD.w / 2, FIELD.h * 0.85, FIELD.h * 0.65);
+}
+
+// 目標地点へ移動する(近づいたら減速)
+function moveToward(p, tx, ty, maxSpeed, dt) {
+  const dx = tx - p.x, dy = ty - p.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist > 0.15) {
+    const speed = Math.min(maxSpeed, dist * 3.0);
+    p.vx = dx / dist * speed;
+    p.vy = dy / dist * speed;
+    p.fx = dx / dist; p.fy = dy / dist;
+  } else {
+    p.vx = 0; p.vy = 0;
   }
 }
 
@@ -314,13 +445,20 @@ function updateAI(p, dt) {
   let tx = p.x, ty = p.y;
 
   if (ball.owner === p) {
-    // ボール保持中: 少し前(ゴール方向)へ運びながら、時間が来たらパス
+    // ボール保持中: 少し前(ゴール方向)へ運びながら、時間が来たらパスかシュート
     p.holdTimer += dt;
     tx = p.x; ty = p.y - 1.5;
     if (p.holdTimer >= p.holdLimit) {
-      const targets = players.filter(q => q !== p);
-      const to = targets[Math.floor(Math.random() * targets.length)];
-      passBall(p, to);
+      if (p.y < 10) {
+        // ゴールが近ければシュート
+        const goalCx = FIELD.w / 2;
+        const aimX = goalCx + (Math.random() * 2 - 1) * (FIELD.goalW / 2 - 0.5);
+        shootBall(p, aimX);
+      } else {
+        const targets = players.filter(q => q !== p);
+        const to = targets[Math.floor(Math.random() * targets.length)];
+        passBall(p, to);
+      }
     }
   } else if (ball.receiver === p && !ball.owner) {
     // 自分あてのパス: ボールを迎えに行く
@@ -341,16 +479,38 @@ function updateAI(p, dt) {
     [tx, ty] = supportSpot(p);
   }
 
-  // 目標地点へ移動(近づいたら減速)
-  const dx = tx - p.x, dy = ty - p.y;
-  const dist = Math.hypot(dx, dy);
-  if (dist > 0.15) {
-    const speed = Math.min(AI_SPEED, dist * 3.0);
-    p.vx = dx / dist * speed;
-    p.vy = dy / dist * speed;
-    p.fx = dx / dist; p.fy = dy / dist;
-  } else {
-    p.vx = 0; p.vy = 0;
+  moveToward(p, tx, ty, AI_SPEED, dt);
+}
+
+// ---------- 敵チームAI ----------
+function updateDefense(dt) {
+  const goalCx = FIELD.w / 2;
+
+  // GK: ゴール前でボールの横位置についていく
+  const gk = defenders.find(d => d.isGK);
+  const gtx = Math.max(goalCx - FIELD.goalW / 2 + 0.7,
+              Math.min(goalCx + FIELD.goalW / 2 - 0.7, ball.x));
+  moveToward(gk, gtx, 1.2, GK_SPEED, dt);
+
+  // フィールドDF: ボールに一番近い1人がプレス、残りは攻撃側をマーク
+  const dfs = defenders.filter(d => !d.isGK);
+  let presser = null, pd = Infinity;
+  for (const d of dfs) {
+    const dd = Math.hypot(ball.x - d.x, ball.y - d.y);
+    if (dd < pd) { pd = dd; presser = d; }
+  }
+  const marks = players.filter(p => ball.owner !== p);
+  let mi = 0;
+  for (const d of dfs) {
+    if (d === presser) {
+      moveToward(d, ball.x, ball.y, DF_SPEED, dt);
+    } else {
+      // マーク相手とゴールの間に立つ
+      const m = marks[mi++ % marks.length];
+      const tx = m.x + (goalCx - m.x) * 0.3;
+      const ty = m.y + (0 - m.y) * 0.3;
+      moveToward(d, tx, ty, DF_SPEED, dt);
+    }
   }
 }
 
@@ -369,6 +529,17 @@ function supportSpot(p) {
 
 // ---------- 更新 ----------
 function update(dt) {
+  // ゴール/ロスト演出中は止めて、時間が来たらリスタート
+  if (game.state !== 'play') {
+    game.timer -= dt;
+    if (game.timer <= 0) {
+      if (game.state === 'goal') setupKickoff();
+      else setupBacklineRestart();
+      game.state = 'play';
+    }
+    return;
+  }
+
   // プレイヤー入力
   let ix = 0, iy = 0;
   if (keys['ArrowLeft']  || keys['a'] || keys['A']) ix -= 1;
@@ -395,9 +566,10 @@ function update(dt) {
   for (const p of players) {
     if (!p.isUser) updateAI(p, dt);
   }
+  updateDefense(dt);
 
   // 選手の移動 + フィールド内にとどめる
-  for (const p of players) {
+  for (const p of everyone) {
     p.x += p.vx * dt;
     p.y += p.vy * dt;
     p.x = Math.max(p.radius, Math.min(FIELD.w - p.radius, p.x));
@@ -413,6 +585,15 @@ function update(dt) {
     ball.x = o.x + o.fx * 0.75;
     ball.y = o.y + o.fy * 0.75;
     ball.vx = 0; ball.vy = 0;
+
+    // 敵に近づきすぎるとボールを奪われる
+    for (const d of defenders) {
+      const dist = Math.hypot(ball.x - d.x, ball.y - d.y);
+      if (dist < STEAL_DIST) {
+        loseBall(d.isGK ? 'save' : 'steal');
+        return;
+      }
+    }
   } else {
     ball.x += ball.vx * dt;
     ball.y += ball.vy * dt;
@@ -420,13 +601,36 @@ function update(dt) {
     const damp = Math.pow(0.35, dt);
     ball.vx *= damp;
     ball.vy *= damp;
-    // 壁で軽くバウンド(Phase 1はアウトオブバウンズなし)
+
+    // ゴールライン(上)に到達: ゴール判定
+    if (ball.y < ball.radius) {
+      const goalCx = FIELD.w / 2;
+      if (Math.abs(ball.x - goalCx) < FIELD.goalW / 2) {
+        onGoal();
+        return;
+      }
+      if (ball.isShot) {
+        loseBall('miss');
+        return;
+      }
+    }
+
+    // 壁で軽くバウンド
     if (ball.x < ball.radius)           { ball.x = ball.radius;           ball.vx *= -0.6; }
     if (ball.x > FIELD.w - ball.radius) { ball.x = FIELD.w - ball.radius; ball.vx *= -0.6; }
     if (ball.y < ball.radius)           { ball.y = ball.radius;           ball.vy *= -0.6; }
     if (ball.y > FIELD.h - ball.radius) { ball.y = FIELD.h - ball.radius; ball.vy *= -0.6; }
 
-    // ボールを拾う判定
+    // 敵がフリーボール/パスをカット
+    for (const d of defenders) {
+      const dist = Math.hypot(ball.x - d.x, ball.y - d.y);
+      if (dist < INTERCEPT_DIST) {
+        loseBall(d.isGK ? 'save' : 'steal');
+        return;
+      }
+    }
+
+    // 味方がボールを拾う判定
     for (const p of players) {
       if (p === ball.lastKicker && ball.kickCooldown > 0) continue;
       const d = Math.hypot(ball.x - p.x, ball.y - p.y);
@@ -514,7 +718,7 @@ function drawPlayer(p) {
   }
 
   // 自分がボール保持中 → 味方に「パスできるよ」の点滅リング
-  if (ball.owner === userPlayer && !p.isUser) {
+  if (ball.owner === userPlayer && !p.isUser && p.team === 'blue') {
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
     ctx.strokeStyle = `rgba(255,255,255,${0.35 + 0.45 * pulse})`;
     ctx.lineWidth = 2.5;
@@ -525,9 +729,14 @@ function drawPlayer(p) {
     ctx.setLineDash([]);
   }
 
-  // からだ
-  ctx.fillStyle = p.isUser ? '#a44dff' : '#2f7bff';
-  ctx.strokeStyle = p.isUser ? '#6a1fc4' : '#1a4fb0';
+  // からだ(むらさき=じぶん / あお=みかた / あか=てき / オレンジ=キーパー)
+  let bodyFill, bodyStroke;
+  if (p.isUser)              { bodyFill = '#a44dff'; bodyStroke = '#6a1fc4'; }
+  else if (p.isGK)           { bodyFill = '#ff9f1a'; bodyStroke = '#b86a00'; }
+  else if (p.team === 'red') { bodyFill = '#ff4d4d'; bodyStroke = '#b31f1f'; }
+  else                       { bodyFill = '#2f7bff'; bodyStroke = '#1a4fb0'; }
+  ctx.fillStyle = bodyFill;
+  ctx.strokeStyle = bodyStroke;
   ctx.lineWidth = Math.max(2, r * 0.18);
   ctx.beginPath();
   ctx.arc(sx, sy, r, 0, Math.PI * 2);
@@ -601,15 +810,15 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 1 / v4)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 2 / v5)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
-    hint = 'やじるしキー か WASD でいどう / ボールをもったら みかたをクリックでパス';
+    hint = 'いどう: やじるし/WASD ・ パス: みかたをクリック ・ シュート: ゴールをクリック';
   } else if (tilt.enabled) {
-    hint = 'スマホを かたむけて いどう / ボールをもったら みかたをタップでパス';
+    hint = 'いどう: かたむける ・ パス: みかたをタップ ・ シュート: ゴールをタップ';
   } else {
-    hint = 'ひだりしたのスティックでいどう / ボールをもったら みかたをタップでパス';
+    hint = 'いどう: ひだりしたスティック ・ パス: みかたをタップ ・ シュート: ゴールをタップ';
   }
   ctx.fillText(hint, window.innerWidth / 2, 50);
 
@@ -650,18 +859,54 @@ function drawToast() {
   ctx.fillText(toast.text, window.innerWidth / 2, ty + 24);
 }
 
+function drawCenterMessage() {
+  if (game.state === 'play') return;
+  const cx = window.innerWidth / 2;
+  const cy = window.innerHeight * 0.4;
+
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 40px sans-serif';
+  ctx.lineWidth = 8;
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  ctx.strokeText(game.message, cx, cy);
+  ctx.fillStyle = game.state === 'goal' ? '#ffe14d' : '#ffffff';
+  ctx.fillText(game.message, cx, cy);
+
+  if (game.sub) {
+    ctx.font = 'bold 18px sans-serif';
+    ctx.lineWidth = 5;
+    ctx.strokeText(game.sub, cx, cy + 34);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(game.sub, cx, cy + 34);
+  }
+}
+
+function drawScore() {
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.beginPath();
+  ctx.roundRect(10, 70, 110, 38, 10);
+  ctx.fill();
+  ctx.fillStyle = '#ffe14d';
+  ctx.font = 'bold 16px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('ゴール ' + game.score, 24, 95);
+}
+
 function draw() {
   drawField();
   drawBall();
   // 下にいる選手を手前に描く
-  const sorted = [...players].sort((a, b) => a.y - b.y);
+  const sorted = [...everyone].sort((a, b) => a.y - b.y);
   for (const p of sorted) drawPlayer(p);
   if (ball.owner) drawBall();  // 保持中はボールを選手より手前に
   drawStick();
   drawHUD();
+  drawScore();
+  drawCenterMessage();
 }
 
 // ---------- ゲームループ ----------
+setupKickoff();
 let lastTime = performance.now();
 function loop(now) {
   let dt = (now - lastTime) / 1000;
