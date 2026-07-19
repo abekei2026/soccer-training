@@ -234,6 +234,22 @@ const S7_GATHER_RADIUS_UNITS = [1, 1.5, 2];
 S7.gatherRadiusIdx = 1;   // 1.5倍
 function s7GatherRadius() { return S7_AREA_W * S7_GATHER_RADIUS_UNITS[S7.gatherRadiusIdx]; }
 
+// しあいモードの設定(Phase 3: 試合前の設定画面で選択)
+const S7_DURATIONS = [120, 180, 300];
+const S7_STRENGTH = [
+  { label: 'よわい', speed: 0.85, think: 0.45 },
+  { label: 'ふつう', speed: 1.0,  think: 0.25 },
+  { label: 'つよい', speed: 1.15, think: 0.10 }
+];
+S7.durationIdx = 1;    // 3ぷん
+S7.strengthIdx = 1;    // ふつう
+S7.showAreas = true;   // エリア表示
+S7.showRadius = false; // 集結半径表示
+S7.timeLeft = 0;
+S7.redThink = 0;       // 赤の「判断の更新間隔」タイマー(反応速度=難易度)
+
+function s7RedSpeed(base) { return base * S7_STRENGTH[S7.strengthIdx].speed; }
+
 const s7All = [...s7Blue, s7BlueGK, s7RedGK, ...s7RedDF];
 
 // ゲーム進行の状態
@@ -552,6 +568,44 @@ function s7ExitButtonRect() {
   return controlButtonRect();
 }
 
+// ---------- しあいモード: 設定画面(Phase 3) ----------
+const S7_SETTING_ROWS = [
+  { label: 'しあい じかん', values: ['2ふん', '3ぷん', '5ふん'],
+    get: () => S7.durationIdx, set: i => { S7.durationIdx = i; } },
+  { label: 'しゅうけつ はんけい', values: ['1', '1.5', '2'],
+    get: () => S7.gatherRadiusIdx, set: i => { S7.gatherRadiusIdx = i; } },
+  { label: 'あいての つよさ', values: ['よわい', 'ふつう', 'つよい'],
+    get: () => S7.strengthIdx, set: i => { S7.strengthIdx = i; } },
+  { label: 'エリア ひょうじ', values: ['ON', 'OFF'],
+    get: () => S7.showAreas ? 0 : 1, set: i => { S7.showAreas = i === 0; } },
+  { label: 'はんけい ひょうじ', values: ['ON', 'OFF'],
+    get: () => S7.showRadius ? 0 : 1, set: i => { S7.showRadius = i === 0; } }
+];
+
+function s7SettingRowRect(i) {
+  const w = Math.min(window.innerWidth - 40, 330), h = 46, gap = 12;
+  const totalH = (h + gap) * S7_SETTING_ROWS.length - gap;
+  const startY = window.innerHeight * 0.46 - totalH / 2;
+  return [(window.innerWidth - w) / 2, startY + i * (h + gap), w, h];
+}
+
+function s7StartMatchButtonRect() {
+  const [, by, , bh] = s7SettingRowRect(S7_SETTING_ROWS.length - 1);
+  const w = 220, h = 54;
+  return [(window.innerWidth - w) / 2, by + bh + 24, w, h];
+}
+
+function s7SetupBackLinkRect() {
+  const [, by, , bh] = s7StartMatchButtonRect();
+  const w = 160, h = 32;
+  return [(window.innerWidth - w) / 2, by + bh + 14, w, h];
+}
+
+function inRect(x, y, rect) {
+  const [bx, by, bw, bh] = rect;
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+
 function timeButtonRect(i) {
   const w = 220, h = 54, gap = 16;
   const totalH = h * 3 + gap * 2;
@@ -651,7 +705,20 @@ function handleTap(sx, sy) {
   if (APP.screen === 'title') {
     if (inPracticeButton(sx, sy)) { sfxClick(); startRound(); }
     else if (inVersusButton(sx, sy)) { sfxClick(); APP.screen = 'timeSelect'; }
-    else if (inS7Button(sx, sy)) { sfxClick(); s7Start(); }
+    else if (inS7Button(sx, sy)) { sfxClick(); APP.screen = 's7Setup'; }
+    return;
+  }
+  if (APP.screen === 's7Setup') {
+    for (let i = 0; i < S7_SETTING_ROWS.length; i++) {
+      if (inRect(sx, sy, s7SettingRowRect(i))) {
+        const row = S7_SETTING_ROWS[i];
+        row.set((row.get() + 1) % row.values.length);
+        sfxClick();
+        return;
+      }
+    }
+    if (inRect(sx, sy, s7StartMatchButtonRect())) { sfxClick(); s7Start(); return; }
+    if (inRect(sx, sy, s7SetupBackLinkRect())) { sfxClick(); APP.screen = 'title'; }
     return;
   }
   if (APP.screen === 'timeSelect') {
@@ -671,7 +738,8 @@ function handleTap(sx, sy) {
   if (APP.screen === 'result') {
     if (inReplayButton(sx, sy)) {
       sfxClick();
-      if (MATCH.mode === 'versus') startVersusRound(MATCH.duration, MATCH.difficulty);
+      if (MATCH.mode === 's7') s7Start();
+      else if (MATCH.mode === 'versus') startVersusRound(MATCH.duration, MATCH.difficulty);
       else startRound();
     } else if (inTitleLink(sx, sy)) { sfxClick(); APP.screen = 'title'; }
     return;
@@ -1304,11 +1372,18 @@ function s7Start() {
   S7.score = 0;
   S7.redScore = 0;
   S7.stealCooldown = 0;
+  S7.timeLeft = S7_DURATIONS[S7.durationIdx];
   judge.active = false;
   s7Kickoff('blue');
   S7.state = 'play';
   S7.cam.x = ball.x;
   S7.cam.y = ball.y;
+  sfxWhistle();
+}
+
+function s7EndMatch() {
+  APP.screen = 'result';
+  judge.active = false;
   sfxWhistle();
 }
 
@@ -1356,6 +1431,7 @@ function s7Kickoff(startTeam) {
   ball.x = kicker.x;
   ball.y = kicker.y + (startTeam === 'red' ? 0.75 : -0.75);
   S7.stealCooldown = 1.0;
+  S7.redThink = 0;
 }
 
 function s7GiveBall(p) {
@@ -1512,7 +1588,7 @@ function s7RedGKAI(dt) {
   const postPad = s7RedGK.radius * 0.4;
   const gtx = Math.max(goalCx - S7F.goalW / 2 + postPad,
               Math.min(goalCx + S7F.goalW / 2 - postPad, targetX));
-  moveToward(s7RedGK, gtx, 1.5, GK_SPEED, dt);
+  moveToward(s7RedGK, gtx, 1.5, s7RedSpeed(GK_SPEED), dt);
 }
 
 // ---------- しあいモード: 赤のゾーンディフェンス(Phase 2) ----------
@@ -1557,7 +1633,8 @@ function s7AttackerInMyArea(p) {
 
 // ゾーンディフェンス: ボールに行くのはプレス役1人+カバー役1人だけ。
 // 残りは自分のエリアを守り、エリア内の攻撃選手をマークする(団子にならない)
-function s7UpdateRedDefense(dt) {
+// 目標位置の計算は「判断の更新間隔」(敵の強さ設定)ごとにしか行わない=反応速度
+function s7ComputeRedDefenseTargets() {
   const radius = s7GatherRadius();
   // ボールに反応するのはホームエリアがボールに近いDFだけ
   const active = s7RedDF.filter(p => Math.hypot(ball.x - p.homeX, ball.y - p.homeY) < radius);
@@ -1592,7 +1669,21 @@ function s7UpdateRedDefense(dt) {
       if (m) [tx, ty] = s7GoalSideOf(m);
       else [tx, ty] = s7DefHomeSlide(p);
     }
-    moveToward(p, tx, ty, versusSpeed('red', DF_SPEED), dt);
+    p.tgtX = tx; p.tgtY = ty;
+    p.isActiveDF = active.includes(p);   // 集結半径の可視化用
+  }
+}
+
+function s7UpdateRedDefense(dt) {
+  S7.redThink -= dt;
+  if (S7.redThink <= 0) {
+    s7ComputeRedDefenseTargets();
+    S7.redThink = S7_STRENGTH[S7.strengthIdx].think;
+  }
+  for (const p of s7RedDF) {
+    moveToward(p, p.tgtX !== undefined ? p.tgtX : p.homeX,
+                  p.tgtY !== undefined ? p.tgtY : p.homeY,
+                  s7RedSpeed(DF_SPEED), dt);
   }
 }
 
@@ -1642,7 +1733,7 @@ function s7UpdateRedAttack(dt) {
     } else {
       [tx, ty] = s7RedAttackSpot(p);
     }
-    moveToward(p, tx, ty, versusSpeed('red', DF_SPEED), dt);
+    moveToward(p, tx, ty, s7RedSpeed(DF_SPEED), dt);
   }
 }
 
@@ -2304,7 +2395,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v18)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v19)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -2897,7 +2988,7 @@ function s7DrawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('しあいモード (Phase 2)', window.innerWidth / 2, 30);
+  ctx.fillText('しあいモード (Phase 3)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -2909,10 +3000,10 @@ function s7DrawHUD() {
   }
   ctx.fillText(hint, window.innerWidth / 2, 50);
 
-  // スコア + 攻守表示(左上)
+  // スコア + 攻守 + 残り時間(左上)
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
   ctx.beginPath();
-  ctx.roundRect(10, 70, 160, 58, 10);
+  ctx.roundRect(10, 70, 160, 82, 10);
   ctx.fill();
   ctx.fillStyle = '#ffe14d';
   ctx.font = 'bold 15px sans-serif';
@@ -2921,6 +3012,10 @@ function s7DrawHUD() {
   ctx.font = 'bold 13px sans-serif';
   ctx.fillStyle = S7.attacker === 'blue' ? '#8fffb0' : '#ffb3b3';
   ctx.fillText(S7.attacker === 'blue' ? 'こうげき ちゅう!' : 'しゅび ちゅう!', 22, 114);
+  const secs = Math.max(0, Math.ceil(S7.timeLeft));
+  const mins = Math.floor(secs / 60);
+  ctx.fillStyle = secs <= 10 ? '#ff8080' : '#ffffff';
+  ctx.fillText('のこり ' + mins + ':' + String(secs % 60).padStart(2, '0'), 22, 138);
 
   drawTiltButton();
   drawToast();
@@ -2953,9 +3048,174 @@ function s7DrawCenterMessage() {
   ctx.fillText(S7.message, cx, cy);
 }
 
+// 学習用の可視化: 6エリアの区切りとホームエリア(トグルでON/OFF)
+function s7DrawZoneAreas() {
+  if (!S7.showAreas) return;
+  const s = view.scale;
+  const rowY = [0, S7F.h * 0.25, S7F.h * 0.5];
+  ctx.save();
+  for (let row = 0; row < 2; row++) {
+    for (let col = 0; col < 3; col++) {
+      const [x0, y0] = toScreen(S7_AREA_W * col, rowY[row]);
+      const w = S7_AREA_W * s, h = (rowY[row + 1] - rowY[row]) * s;
+      ctx.fillStyle = (row + col) % 2 === 0 ? 'rgba(255,90,90,0.10)' : 'rgba(255,90,90,0.05)';
+      ctx.fillRect(x0, y0, w, h);
+    }
+  }
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([8, 6]);
+  for (let col = 1; col < 3; col++) {
+    const [x0, y0] = toScreen(S7_AREA_W * col, 0);
+    const [, y1] = toScreen(0, S7F.h * 0.5);
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.stroke();
+  }
+  for (let row = 1; row < 3; row++) {
+    const [x0, y0] = toScreen(0, rowY[row]);
+    const [x1] = toScreen(S7F.w, 0);
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y0); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// 学習用の可視化: 集結半径の円 + 反応中のDFハイライト(トグルでON/OFF)
+function s7DrawGatherRadius() {
+  if (!S7.showRadius || S7.attacker !== 'blue') return;
+  const [bx, by] = toScreen(ball.x, ball.y);
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,225,77,0.55)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([10, 8]);
+  ctx.beginPath();
+  ctx.arc(bx, by, s7GatherRadius() * view.scale, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // 半径内で反応しているDFを軽くハイライト
+  for (const p of s7RedDF) {
+    if (!p.isActiveDF) continue;
+    const [px, py] = toScreen(p.x, p.y);
+    ctx.strokeStyle = 'rgba(255,225,77,0.6)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(px, py, p.radius * view.scale * 1.7, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawS7SetupScreen() {
+  drawField();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  const cx = window.innerWidth / 2;
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillStyle = '#ffe14d';
+  const [, firstY] = s7SettingRowRect(0);
+  ctx.fillText('しあいの せってい', cx, firstY - 28);
+
+  S7_SETTING_ROWS.forEach((row, i) => {
+    const [bx, by, bw, bh] = s7SettingRowRect(i);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 10);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(row.label, bx + 14, by + bh / 2 + 5);
+
+    // 現在の値(タップで切り替わることが分かるように矢印を付ける)
+    const value = row.values[row.get()];
+    ctx.fillStyle = 'rgba(255,225,77,0.92)';
+    const pillW = 96, pillH = 32;
+    ctx.beginPath();
+    ctx.roundRect(bx + bw - pillW - 8, by + (bh - pillH) / 2, pillW, pillH, 8);
+    ctx.fill();
+    ctx.fillStyle = '#553c00';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(value + ' ▸', bx + bw - pillW / 2 - 8, by + bh / 2 + 5);
+  });
+
+  const [sbx, sby, sbw, sbh] = s7StartMatchButtonRect();
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 300);
+  ctx.fillStyle = `rgba(150,255,170,${0.85 + 0.15 * pulse})`;
+  ctx.beginPath();
+  ctx.roundRect(sbx, sby, sbw, sbh, 14);
+  ctx.fill();
+  ctx.strokeStyle = '#1d5c2a';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = '#1d5c2a';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('しあい スタート!', sbx + sbw / 2, sby + sbh / 2 + 8);
+
+  const [lbx, lby, lbw, lbh] = s7SetupBackLinkRect();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('タイトルへ もどる', lbx + lbw / 2, lby + lbh / 2 + 5);
+}
+
+function drawS7ResultScreen() {
+  drawField();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  const cx = window.innerWidth / 2;
+  ctx.textAlign = 'center';
+
+  let title, titleColor;
+  if (S7.score > S7.redScore) { title = 'かち!'; titleColor = '#ffe14d'; }
+  else if (S7.score < S7.redScore) { title = 'まけ…'; titleColor = '#ffffff'; }
+  else { title = 'ひきわけ'; titleColor = '#ffffff'; }
+
+  ctx.font = 'bold 32px sans-serif';
+  ctx.lineWidth = 7;
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+  ctx.strokeText(title, cx, window.innerHeight * 0.16);
+  ctx.fillStyle = titleColor;
+  ctx.fillText(title, cx, window.innerHeight * 0.16);
+
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('あなた ' + S7.score + ' - ' + S7.redScore + ' あいて', cx, window.innerHeight * 0.26);
+
+  ctx.font = '14px sans-serif';
+  ctx.fillStyle = '#cccccc';
+  ctx.fillText('せってい: ' + S7_SETTING_ROWS[0].values[S7.durationIdx] +
+               ' / はんけい ' + S7_SETTING_ROWS[1].values[S7.gatherRadiusIdx] +
+               ' / ' + S7_STRENGTH[S7.strengthIdx].label, cx, window.innerHeight * 0.32);
+
+  const [rbx, rby, rbw, rbh] = replayButtonRect();
+  ctx.fillStyle = 'rgba(255,225,77,0.92)';
+  ctx.beginPath();
+  ctx.roundRect(rbx, rby, rbw, rbh, 14);
+  ctx.fill();
+  ctx.strokeStyle = '#553c00';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = '#553c00';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('もういちど あそぶ', rbx + rbw / 2, rby + rbh / 2 + 7);
+
+  const [tbx, tby, tbw, tbh] = titleLinkRect();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('タイトルへ もどる', tbx + tbw / 2, tby + tbh / 2 + 5);
+}
+
 function s7Draw() {
   s7ApplyCamera();
   s7DrawField();
+  s7DrawZoneAreas();
+  s7DrawGatherRadius();
   s7DrawPassLanes();
   drawBall();
   const sorted = [...s7All].sort((a, b) => a.y - b.y);
@@ -2976,7 +3236,9 @@ function draw() {
   if (APP.screen === 'title') { drawTitleScreen(); return; }
   if (APP.screen === 'timeSelect') { drawTimeSelectScreen(); return; }
   if (APP.screen === 'levelSelect') { drawLevelSelectScreen(); return; }
+  if (APP.screen === 's7Setup') { drawS7SetupScreen(); return; }
   if (APP.screen === 'result') {
+    if (MATCH.mode === 's7') { drawS7ResultScreen(); return; }
     if (MATCH.mode === 'versus') drawVersusResultScreen(); else drawResultScreen();
     return;
   }
@@ -3022,14 +3284,20 @@ function loop(now) {
   rawDt = Math.min(rawDt, 0.05);  // タブ復帰時などの大ジャンプを防ぐ
 
   if (APP.screen === 'play' && MATCH.mode === 's7') {
-    if (judge.active) {
-      judge.timer -= rawDt;
-      if (judge.timer <= 0) {
-        judge.timer = 0;
-        judge.active = false;
+    S7.timeLeft -= rawDt;
+    if (S7.timeLeft <= 0) {
+      S7.timeLeft = 0;
+      s7EndMatch();
+    } else {
+      if (judge.active) {
+        judge.timer -= rawDt;
+        if (judge.timer <= 0) {
+          judge.timer = 0;
+          judge.active = false;
+        }
       }
+      s7Update(rawDt * (judge.active ? SLOWMO_SCALE : 1));
     }
-    s7Update(rawDt * (judge.active ? SLOWMO_SCALE : 1));
   } else if (APP.screen === 'play' && MATCH.mode === 'versus') {
     MATCH.timeLeft -= rawDt;
     if (MATCH.timeLeft <= 0) {
