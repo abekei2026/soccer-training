@@ -177,31 +177,60 @@ const S7 = {
   score: 0
 };
 
-function s7MakeBlue(id, x, y, role, minY, maxY) {
+function s7MakeBlue(id, x, y, role, minY, maxY, pushDist) {
   const p = makePlayer(id, x, y, false);
   p.role = role;         // 'DF' / 'MF' / 'FW'
   p.baseX = x; p.baseY = y;
   p.minY = minY; p.maxY = maxY;   // 役割ごとの担当範囲(縦方向)
+  p.pushDist = pushDist;          // 攻撃が深いときに前へ押し上がる最大距離(m)
   return p;
 }
 
 // 青: フィールドプレーヤー6人(DF2/MF2/FW2) + GK。攻めるゴールは上(y=0)
 const s7Blue = [
-  s7MakeBlue(30, S7F.w * 0.28, S7F.h * 0.80, 'DF', S7F.h * 0.60, S7F.h * 0.95),
-  s7MakeBlue(31, S7F.w * 0.72, S7F.h * 0.80, 'DF', S7F.h * 0.60, S7F.h * 0.95),
-  s7MakeBlue(32, S7F.w * 0.28, S7F.h * 0.55, 'MF', S7F.h * 0.32, S7F.h * 0.78),
-  s7MakeBlue(33, S7F.w * 0.72, S7F.h * 0.55, 'MF', S7F.h * 0.32, S7F.h * 0.78),
-  s7MakeBlue(34, S7F.w * 0.32, S7F.h * 0.30, 'FW', S7F.h * 0.06, S7F.h * 0.55),
-  s7MakeBlue(35, S7F.w * 0.68, S7F.h * 0.30, 'FW', S7F.h * 0.06, S7F.h * 0.55)
+  s7MakeBlue(30, S7F.w * 0.28, S7F.h * 0.80, 'DF', S7F.h * 0.60, S7F.h * 0.95, 9),
+  s7MakeBlue(31, S7F.w * 0.72, S7F.h * 0.80, 'DF', S7F.h * 0.60, S7F.h * 0.95, 9),
+  s7MakeBlue(32, S7F.w * 0.28, S7F.h * 0.55, 'MF', S7F.h * 0.32, S7F.h * 0.78, 7),
+  s7MakeBlue(33, S7F.w * 0.72, S7F.h * 0.55, 'MF', S7F.h * 0.32, S7F.h * 0.78, 7),
+  s7MakeBlue(34, S7F.w * 0.32, S7F.h * 0.30, 'FW', S7F.h * 0.06, S7F.h * 0.55, 3),
+  s7MakeBlue(35, S7F.w * 0.68, S7F.h * 0.30, 'FW', S7F.h * 0.06, S7F.h * 0.55, 3)
 ];
 const s7BlueGK = (() => {
   const p = makePlayer(36, S7F.w / 2, S7F.h - 1.5, false);
   p.isGK = true;
   return p;
 })();
-// 赤: Phase 1 はGKのみ(ゾーンディフェンス6人はPhase 2で追加)
+
+// 赤: GK + フィールドプレーヤー6人(ゾーンディフェンス)
 const s7RedGK = makeDefender(40, S7F.w / 2, 1.5, true);
-const s7All = [...s7Blue, s7BlueGK, s7RedGK];
+
+const S7_AREA_W = S7F.w / 3;   // 集結半径の単位=エリアの横幅
+// エリア: 縦(コート幅)3分割 × 横(ゴール方向)2分割。row 0=自ゴール側(後ろ)/ 1=ハーフウェー側(前)
+function s7AreaCenter(col, row) {
+  const x = S7_AREA_W * (col + 0.5);
+  const y = row === 0 ? S7F.h * 0.125 : S7F.h * 0.375;
+  return [x, y];
+}
+const S7_RED_AREAS = [[0, 0], [1, 0], [2, 0], [0, 1], [1, 1], [2, 1]];
+function s7MakeRedDF(id, areaIdx) {
+  const [col, row] = S7_RED_AREAS[areaIdx];
+  const [ax, ay] = s7AreaCenter(col, row);
+  const p = makeDefender(id, ax, ay, false);
+  p.areaCol = col; p.areaRow = row;
+  p.homeX = ax; p.homeY = ay;
+  return p;
+}
+const s7RedDF = [
+  s7MakeRedDF(41, 0), s7MakeRedDF(42, 1), s7MakeRedDF(43, 2),
+  s7MakeRedDF(44, 3), s7MakeRedDF(45, 4), s7MakeRedDF(46, 5)
+];
+
+// なんいど設定(Phase 3で選択画面を用意する。今は初期値のみ)
+const S7_GATHER_RADIUS_UNITS = [1, 1.5, 2];
+S7.gatherRadiusIdx = 1;   // 1.5倍
+function s7GatherRadius() { return S7_AREA_W * S7_GATHER_RADIUS_UNITS[S7.gatherRadiusIdx]; }
+
+const s7All = [...s7Blue, s7BlueGK, s7RedGK, ...s7RedDF];
 
 // ゲーム進行の状態
 const game = {
@@ -1308,6 +1337,25 @@ function s7Kickoff() {
 }
 
 function s7GiveBall(p) {
+  if (p.team === 'red' && !p.isGK) {
+    // 赤のフィールドプレーヤーが奪った: すぐ前方(ハーフウェー方向)へクリアする
+    // (このモードの赤は守備専用。ドリブル攻撃はしない)
+    const tx = 4 + Math.random() * (S7F.w - 8);
+    const ty = Math.min(S7F.h - 4, p.y + 10 + Math.random() * 6);
+    const dx = tx - p.x, dy = ty - p.y;
+    const len = Math.hypot(dx, dy) || 1;
+    ball.owner = null;
+    ball.receiver = null;
+    ball.isShot = false;
+    ball.vx = dx / len * 10;
+    ball.vy = dy / len * 10;
+    ball.x = p.x; ball.y = p.y;
+    ball.lastKicker = p;
+    ball.kickCooldown = KICK_COOLDOWN;
+    sfxLost();
+    return;
+  }
+
   ball.owner = p;
   ball.vx = 0; ball.vy = 0;
   ball.receiver = null;
@@ -1336,7 +1384,7 @@ function s7Goal() {
 
 // パスコースのリスク判定(しあいモード用: 赤チーム相手)
 function s7LaneRisky(from, to) {
-  const reds = [s7RedGK];   // Phase 2 で守備6人を追加予定
+  const reds = [s7RedGK, ...s7RedDF];
   const abx = to.x - from.x, aby = to.y - from.y;
   const abLen2 = abx * abx + aby * aby || 1;
   for (const d of reds) {
@@ -1349,11 +1397,21 @@ function s7LaneRisky(from, to) {
   return false;
 }
 
-// 役割の基準ポジションからボール方向へ寄る(担当範囲の外へは出ない)
+// 攻撃が深いほど(ボールが相手ゴールに近いほど)チーム全体が押し上がる度合い 0〜1
+function s7TeamPush() {
+  const half = S7F.h / 2;
+  return Math.max(0, Math.min(1, (half - ball.y) / half));
+}
+
+// 役割の基準ポジションからボール方向へ寄る。攻撃が深いときは担当範囲ごと前へ押し上がる
 function s7FormationSpot(p) {
+  const push = s7TeamPush() * (p.pushDist || 0);
+  const dynBaseY = p.baseY - push;
+  const dynMinY = p.minY - push;
+  const dynMaxY = p.maxY - push;
   let tx = p.baseX + (ball.x - p.baseX) * 0.35;
-  let ty = p.baseY + (ball.y - p.baseY) * 0.4;
-  ty = Math.max(p.minY, Math.min(p.maxY, ty));
+  let ty = dynBaseY + (ball.y - dynBaseY) * 0.4;
+  ty = Math.max(dynMinY, Math.min(dynMaxY, ty));
   tx = Math.max(1.5, Math.min(S7F.w - 1.5, tx));
   return [tx, ty];
 }
@@ -1429,6 +1487,89 @@ function s7RedGKAI(dt) {
   moveToward(s7RedGK, gtx, 1.5, GK_SPEED, dt);
 }
 
+// ---------- しあいモード: 赤のゾーンディフェンス(Phase 2) ----------
+
+// ゴールサイド(攻撃選手とじぶんのゴールを結ぶ線上、攻撃選手寄り)に立つ位置
+function s7GoalSideOf(attacker) {
+  const goalCx = S7F.w / 2, goalY = 0;
+  const tx = attacker.x + (goalCx - attacker.x) * 0.3;
+  const ty = attacker.y + (goalY - attacker.y) * 0.3;
+  return [tx, ty];
+}
+
+// ホームエリアの基準位置(ボールサイドへ0.4エリア幅だけスライドする)
+function s7DefHomeSlide(p) {
+  const slide = S7_AREA_W * 0.4;
+  const dir = ball.x > p.homeX ? 1 : -1;
+  let tx = p.homeX + dir * slide;
+  tx = Math.max(1.5, Math.min(S7F.w - 1.5, tx));
+  return [tx, p.homeY];
+}
+
+// 集結半径の外にいるDFに、なるべく重複なく近い攻撃選手を割り当てる
+function s7AssignMarks(outsideDFs) {
+  const pairs = [];
+  for (const p of outsideDFs) {
+    for (const a of s7Blue) {
+      pairs.push({ p, a, d: Math.hypot(a.x - p.homeX, a.y - p.homeY) });
+    }
+  }
+  pairs.sort((x, y) => x.d - y.d);
+  const usedP = new Set(), usedA = new Set(), assignment = new Map();
+  for (const { p, a } of pairs) {
+    if (usedP.has(p) || usedA.has(a)) continue;
+    assignment.set(p, a);
+    usedP.add(p); usedA.add(a);
+  }
+  return assignment;
+}
+
+function s7UpdateRedDefense(dt) {
+  const radius = s7GatherRadius();
+  const inRadius = s7RedDF.filter(p => Math.hypot(ball.x - p.homeX, ball.y - p.homeY) < radius);
+  const outside = s7RedDF.filter(p => !inRadius.includes(p));
+
+  // 集結半径内: ボール保持者に一番近いDFがチャレンジ役(プレス)
+  let presser = null, pd = Infinity;
+  for (const p of inRadius) {
+    const d = Math.hypot(ball.x - p.x, ball.y - p.y);
+    if (d < pd) { pd = d; presser = p; }
+  }
+
+  const marks = s7AssignMarks(outside);
+
+  for (const p of s7RedDF) {
+    let tx, ty;
+    if (inRadius.includes(p)) {
+      if (p === presser) {
+        // チャレンジ役: ボール保持者へ直接プレス
+        tx = ball.x; ty = ball.y;
+      } else {
+        // カバー役: 一番近い攻撃選手へのパスコースを切る位置(ボールとその選手の中間)に立つ
+        let nearest = null, nd = Infinity;
+        for (const a of s7Blue) {
+          const d = Math.hypot(a.x - p.x, a.y - p.y);
+          if (d < nd) { nd = d; nearest = a; }
+        }
+        if (nearest) {
+          tx = (ball.x + nearest.x) / 2;
+          ty = (ball.y + nearest.y) / 2;
+        } else {
+          [tx, ty] = s7DefHomeSlide(p);
+        }
+      }
+    } else {
+      const mark = marks.get(p);
+      if (mark) {
+        [tx, ty] = s7GoalSideOf(mark);
+      } else {
+        [tx, ty] = s7DefHomeSlide(p);
+      }
+    }
+    moveToward(p, tx, ty, versusSpeed('red', DF_SPEED), dt);
+  }
+}
+
 function s7Update(dt) {
   if (S7.state !== 'play') {
     S7.timer -= dt;
@@ -1461,13 +1602,14 @@ function s7Update(dt) {
     controlledPlayer.vx = 0; controlledPlayer.vy = 0;
   }
 
-  // 味方AI + 両GK
+  // 味方AI + 両GK + 赤ゾーンディフェンス
   for (const p of s7Blue) {
     if (p === controlledPlayer) continue;
     s7AttackAI(p, dt);
   }
   s7BlueGKAI(dt);
   s7RedGKAI(dt);
+  s7UpdateRedDefense(dt);
 
   // 移動 + コート内クランプ
   for (const p of s7All) {
@@ -2031,7 +2173,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v15)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v16)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -2586,7 +2728,8 @@ function s7DrawMinimap() {
     dot(p, '#4d94ff', 2.4);
   }
   dot(s7BlueGK, '#ffb340', 2.4);
-  dot(s7RedGK, '#ff5c5c', 2.4);
+  for (const p of s7RedDF) dot(p, '#ff5c5c', 2.2);
+  dot(s7RedGK, '#ffb340', 2.4);
   // 操作中の選手(目立つ色+白ふち)
   {
     const p = controlledPlayer;
@@ -2623,7 +2766,7 @@ function s7DrawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('しあいモード (Phase 1)', window.innerWidth / 2, 30);
+  ctx.fillText('しあいモード (Phase 2)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
