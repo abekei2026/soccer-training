@@ -222,6 +222,8 @@ function s7MakeRedDF(id, areaIdx) {
   const p = makeDefender(id, ax, ay, false);
   p.areaCol = col; p.areaRow = row;
   p.homeX = ax; p.homeY = ay;
+  // 攻撃時の役割(戦術エンジン用): 後列=DF、前列は中央がMF・両サイドがFW
+  p.role = row === 0 ? 'DF' : (col === 1 ? 'MF' : 'FW');
   return p;
 }
 const s7RedDF = [
@@ -249,6 +251,45 @@ S7.timeLeft = 0;
 S7.redThink = 0;       // 赤の「判断の更新間隔」タイマー(反応速度=難易度)
 
 function s7RedSpeed(base) { return base * S7_STRENGTH[S7.strengthIdx].speed; }
+
+// ---------- しあいモード: 攻撃の作戦(戦術) ----------
+// 各戦術は「ボールに対する役割ごとの前後距離」と「レーン(横位置)の作り方」のセット
+const S7_TACTICS = [
+  { key: 'side',    label: 'サイド' },
+  { key: 'center',  label: 'ちゅうおう' },
+  { key: 'counter', label: 'カウンター' },
+  { key: 'possess', label: 'ポゼッション' },
+  { key: 'long',    label: 'ロング' }
+];
+const S7_TACTIC_PARAMS = {
+  //                ボールよりどれだけ前か(m)         レーンの作り方
+  side:    { ahead: { FW: 8,  MF: 0,  DF: -9 },  laneMode: 'wide' },                     // サイド攻撃+オーバーラップ
+  center:  { ahead: { FW: 7,  MF: 1,  DF: -9 },  laneMode: 'narrow', runs: true },       // 中央突破+裏抜けラン
+  counter: { ahead: { FW: 13, MF: 3,  DF: -13 }, laneMode: 'normal', sprint: true },     // 速攻(奪った直後FWがスプリント)
+  possess: { ahead: { FW: 5,  MF: -1, DF: -7 },  laneMode: 'close' },                    // ボール周りに三角形
+  long:    { ahead: { FW: 12, MF: 2,  DF: -10 }, laneMode: 'normal', holdLine: true }    // FWが前線に張ってロングボールを待つ
+};
+
+S7.blueTacticIdx = 0;       // じぶんの作戦
+S7.redTacticIdx = 0;        // あいての作戦(0=おまかせ)
+S7.redTacticKey = 'side';   // おまかせのとき試合開始時に抽選される実際の作戦
+S7.blueGatherRadiusIdx = 1; // じぶんの守備の集結半径
+S7.blueCounterT = 0;        // カウンター用: 奪った直後の数秒間
+S7.redCounterT = 0;
+
+function s7BlueGatherRadius() { return S7_AREA_W * S7_GATHER_RADIUS_UNITS[S7.blueGatherRadiusIdx]; }
+
+function s7ApplyRedTactic() {
+  if (S7.redTacticIdx === 0) {
+    S7.redTacticKey = S7_TACTICS[Math.floor(Math.random() * S7_TACTICS.length)].key;
+  } else {
+    S7.redTacticKey = S7_TACTICS[S7.redTacticIdx - 1].key;
+  }
+}
+
+function s7TeamTactic(team) {
+  return team === 'blue' ? S7_TACTICS[S7.blueTacticIdx].key : S7.redTacticKey;
+}
 
 const s7All = [...s7Blue, s7BlueGK, s7RedGK, ...s7RedDF];
 
@@ -572,7 +613,13 @@ function s7ExitButtonRect() {
 const S7_SETTING_ROWS = [
   { label: 'しあい じかん', values: ['2ふん', '3ぷん', '5ふん'],
     get: () => S7.durationIdx, set: i => { S7.durationIdx = i; } },
-  { label: 'しゅうけつ はんけい', values: ['1', '1.5', '2'],
+  { label: 'こうげき さくせん', values: ['サイド', 'ちゅうおう', 'カウンター', 'ポゼッション', 'ロング'],
+    get: () => S7.blueTacticIdx, set: i => { S7.blueTacticIdx = i; } },
+  { label: 'あいての さくせん', values: ['おまかせ', 'サイド', 'ちゅうおう', 'カウンター', 'ポゼッション', 'ロング'],
+    get: () => S7.redTacticIdx, set: i => { S7.redTacticIdx = i; s7ApplyRedTactic(); } },
+  { label: 'じぶんの はんけい', values: ['1', '1.5', '2'],
+    get: () => S7.blueGatherRadiusIdx, set: i => { S7.blueGatherRadiusIdx = i; } },
+  { label: 'あいての はんけい', values: ['1', '1.5', '2'],
     get: () => S7.gatherRadiusIdx, set: i => { S7.gatherRadiusIdx = i; } },
   { label: 'あいての つよさ', values: ['よわい', 'ふつう', 'つよい'],
     get: () => S7.strengthIdx, set: i => { S7.strengthIdx = i; } },
@@ -583,7 +630,7 @@ const S7_SETTING_ROWS = [
 ];
 
 function s7SettingRowRect(i) {
-  const w = Math.min(window.innerWidth - 40, 330), h = 46, gap = 12;
+  const w = Math.min(window.innerWidth - 40, 330), h = 42, gap = 10;
   const totalH = (h + gap) * S7_SETTING_ROWS.length - gap;
   const startY = window.innerHeight * 0.46 - totalH / 2;
   return [(window.innerWidth - w) / 2, startY + i * (h + gap), w, h];
@@ -609,17 +656,17 @@ function inRect(x, y, rect) {
 // ---------- しあいモード: ポーズメニュー(試合中に設定変更) ----------
 S7.paused = false;
 // ポーズ中に変更できる設定(S7_SETTING_ROWSのインデックス。試合時間は変更不可)
-const S7_PAUSE_ROWS = [1, 2, 3, 4];
+const S7_PAUSE_ROWS = [1, 2, 3, 4, 5, 6, 7];
 
 function s7PauseButtonRect() {
   // 左上のスコアボックスのすぐ下
-  return [10, 162, 120, 36];
+  return [10, 184, 120, 36];
 }
 
 function s7PauseRowRect(i) {
-  const w = Math.min(window.innerWidth - 40, 330), h = 46, gap = 12;
+  const w = Math.min(window.innerWidth - 40, 330), h = 42, gap = 10;
   const totalH = (h + gap) * S7_PAUSE_ROWS.length - gap;
-  const startY = window.innerHeight * 0.42 - totalH / 2;
+  const startY = window.innerHeight * 0.44 - totalH / 2;
   return [(window.innerWidth - w) / 2, startY + i * (h + gap), w, h];
 }
 
@@ -1437,6 +1484,7 @@ function s7Start() {
   S7.timeLeft = S7_DURATIONS[S7.durationIdx];
   S7.paused = false;
   judge.active = false;
+  s7ApplyRedTactic();   // あいての作戦(おまかせならここで抽選)
   s7Kickoff('blue');
   S7.state = 'play';
   S7.cam.x = ball.x;
@@ -1496,6 +1544,8 @@ function s7Kickoff(startTeam) {
   ball.y = kicker.y + (startTeam === 'red' ? 0.75 : -0.75);
   S7.stealCooldown = 1.0;
   S7.redThink = 0;
+  S7.blueCounterT = 0;
+  S7.redCounterT = 0;
 }
 
 // しあいモード用のパス: フルコートは距離が長いので、距離に応じて強く蹴る
@@ -1534,6 +1584,9 @@ function s7GiveBall(p) {
   }
 
   if (prevAttacker !== p.team) {
+    // カウンター作戦用: 奪った直後の数秒間を記録
+    if (p.team === 'blue') S7.blueCounterT = 4;
+    else S7.redCounterT = 4;
     judge.active = p.team === 'blue' ? judge.active : false;
     showToast(p.team === 'blue' ? 'こうげき スタート!' : 'あいての こうげき! もどって まもろう!');
     sfxLost();
@@ -1581,19 +1634,93 @@ function s7LaneRisky(from, to) {
   return false;
 }
 
-// 攻撃時のポジション: ボールの高さに役割ごとのオフセットでついていく。
-// ボールが前進すれば全員(DFも)どんどん押し上がり、攻撃で数的有利を作る
-const S7_ATK_OFFSET = { FW: -7, MF: 1, DF: 9 };   // ボールより前(-)/後ろ(+)の距離(m)
-const S7_ATK_MAX_Y  = { FW: 4,  MF: 7, DF: 12 };  // 相手ゴールへどこまで近づけるか
-function s7FormationSpot(p) {
-  let ty = ball.y + S7_ATK_OFFSET[p.role];
-  ty = Math.max(S7_ATK_MAX_Y[p.role], Math.min(p.maxY, ty));
-  let tx = p.baseX + (ball.x - p.baseX) * 0.3;
+// 攻撃時のポジション(戦術エンジン): 選んだ作戦に応じて
+// 「ボールに対する前後距離」と「レーンの作り方」が変わる。
+// 青の座標系(上へ攻める)で計算し、赤はyを反転して使う
+function s7AttackSpot(p, team) {
+  const T = S7_TACTIC_PARAMS[s7TeamTactic(team)];
+  const mirror = team === 'red';
+  const by = mirror ? S7F.h - ball.y : ball.y;   // ボールy(青の座標系)
+  const bx = ball.x;
+  const role = p.role;
+  const lane = team === 'blue' ? p.baseX : p.homeX;
+  const goalCx = S7F.w / 2;
+  const capMin = { FW: 4, MF: 7, DF: 12 }[role];   // 相手ゴールへ近づける限界
+  const capMax = { FW: S7F.h * 0.62, MF: S7F.h * 0.80, DF: S7F.h * 0.95 }[role];
+  const ballSide = Math.sign(bx - goalCx) || 1;
+  const mySide = Math.sign(lane - goalCx) || 1;
+
+  let ty = by - T.ahead[role];
+  let tx;
+
+  switch (T.laneMode) {
+    case 'wide': {
+      // サイド攻撃: FW/MFはタッチライン際まで開いて守備を横に広げる
+      if (role === 'DF') {
+        tx = lane + (bx - lane) * 0.25;
+      } else {
+        tx = mySide < 0 ? S7F.w * 0.10 : S7F.w * 0.90;
+      }
+      if (role === 'MF' && mySide === ballSide) {
+        // ボールサイドのMFはウイングの外を追い越す(オーバーラップ)
+        ty = by - 6;
+        tx = mySide < 0 ? S7F.w * 0.06 : S7F.w * 0.94;
+      }
+      if (role === 'FW' && by < S7F.h * 0.25 && mySide !== ballSide) {
+        // 深く攻めたら逆サイドFWはファーポストへ入る
+        tx = goalCx + mySide * 2.5;
+      }
+      break;
+    }
+    case 'narrow':
+      // 中央突破: 全員が中央レーンに絞る
+      tx = goalCx + (lane - goalCx) * 0.35 + (bx - goalCx) * 0.2;
+      break;
+    case 'close': {
+      // ポゼッション: ボールの周りに近い距離で三角形を作る
+      const lat = role === 'DF' ? 7 : 5.5;
+      tx = bx + mySide * lat;
+      break;
+    }
+    default:
+      tx = lane + (bx - lane) * 0.3;
+  }
+
+  if (T.holdLine && role === 'FW') {
+    // ロングボール: FWはボールに合わせて下がらず、前線に張り続ける
+    ty = 10;
+    tx = goalCx + mySide * 5;
+  }
+
+  ty = Math.max(capMin, Math.min(capMax, ty));
   tx = Math.max(1.5, Math.min(S7F.w - 1.5, tx));
-  return [tx, ty];
+  return [tx, mirror ? S7F.h - ty : ty];
+}
+
+// 中央突破のFW裏抜けラン: ときどき2秒間、DFラインの裏(中央)へ全力で走り込む
+function s7UpdateRun(p, dt, team) {
+  p.running = p.running || 0;
+  p.runCd = (p.runCd === undefined ? 2 + Math.random() * 3 : p.runCd) - dt;
+  if (p.runCd <= 0 && p.running <= 0) {
+    p.running = 2.0;
+    p.runCd = 4 + Math.random() * 3;
+  }
+  if (p.running > 0) {
+    p.running -= dt;
+    const mirror = team === 'red';
+    const by = mirror ? S7F.h - ball.y : ball.y;
+    const lane = team === 'blue' ? p.baseX : p.homeX;
+    const ty = Math.max(4, by - 13);
+    let tx = S7F.w / 2 + (lane < S7F.w / 2 ? -3 : 3);
+    tx = Math.max(1.5, Math.min(S7F.w - 1.5, tx));
+    return [tx, mirror ? S7F.h - ty : ty];
+  }
+  return null;
 }
 
 function s7AttackAI(p, dt) {
+  const T = S7_TACTIC_PARAMS[s7TeamTactic('blue')];
+  let speed = AI_SPEED;
   let tx, ty;
   if (ball.receiver === p && !ball.owner) {
     // 自分あてのパスを迎えに行く
@@ -1608,11 +1735,18 @@ function s7AttackAI(p, dt) {
       if (d < nd) { nd = d; nearest = q; }
     }
     if (nearest === p) { tx = ball.x; ty = ball.y; }
-    else { [tx, ty] = s7FormationSpot(p); }
-  } else {
-    [tx, ty] = s7FormationSpot(p);
   }
-  moveToward(p, tx, ty, AI_SPEED, dt);
+  if (tx === undefined) {
+    // 中央突破: FWの裏抜けラン
+    if (T.runs && p.role === 'FW') {
+      const run = s7UpdateRun(p, dt, 'blue');
+      if (run) { [tx, ty] = run; speed = AI_SPEED * 1.2; }
+    }
+    if (tx === undefined) [tx, ty] = s7AttackSpot(p, 'blue');
+    // カウンター: 奪った直後の数秒間、FWは全力で駆け上がる
+    if (T.sprint && p.role === 'FW' && S7.blueCounterT > 0) speed = AI_SPEED * 1.25;
+  }
+  moveToward(p, tx, ty, speed, dt);
 }
 
 function s7BlueGKAI(dt) {
@@ -1771,22 +1905,15 @@ function s7UpdateRedDefense(dt) {
 
 // ---------- しあいモード: 赤の攻撃 / 青の帰陣・守備 ----------
 
-// 赤の攻撃時のポジション: 青と同じく「ボールの高さについていく」方式。
-// 前列はボールより前(青ゴール側)へ走り込み、攻撃が深まるほど
-// ワイドのレーンからゴール幅へ絞り込んでペナルティエリアに押し寄せる
+// 赤の攻撃時のポジション: 戦術エンジン(s7AttackSpot)を赤の向きで使い、
+// 攻撃が深まるほどゴール幅へ絞り込んでペナルティエリアに押し寄せる
 function s7RedAttackSpot(p) {
+  let [tx, ty] = s7AttackSpot(p, 'red');
+  // 攻撃の深さに応じたゴール幅への絞り込み(赤のペナルティエリア圧を維持)
   const goalCx = S7F.w / 2;
-  const offset = p.areaRow === 1 ? 7 : -6;                   // +y = 青ゴール方向
-  const maxY   = p.areaRow === 1 ? S7F.h - 3 : S7F.h - 12;   // 前列はゴール前まで入る
-  const minY   = p.areaRow === 1 ? S7F.h * 0.30 : S7F.h * 0.18;
-  let ty = ball.y + offset;
-  ty = Math.max(minY, Math.min(maxY, ty));
-
-  // 攻撃の深さ 0〜1(ボールが青ゴールに近いほど1)
   const deep = Math.max(0, Math.min(1, (ball.y - S7F.h * 0.5) / (S7F.h * 0.3)));
-  const squeeze = p.areaRow === 1 ? 0.55 : 0.3;
-  let tx = p.homeX + (goalCx - p.homeX) * deep * squeeze
-         + (ball.x - p.homeX) * 0.25 * (1 - deep);
+  const squeeze = p.role === 'DF' ? 0.3 : 0.45;
+  tx = tx + (goalCx - tx) * deep * squeeze;
   tx = Math.max(1.5, Math.min(S7F.w - 1.5, tx));
   return [tx, ty];
 }
@@ -1814,6 +1941,11 @@ function s7RedChoosePassTarget(p) {
   const forward = mates.filter(q => q.y > p.y + 2);
   const openForward = forward.filter(q => !s7RedLaneRisky(p, q));
 
+  // ロングボール作戦: 距離に関係なく、空いている一番前の仲間へ放り込む
+  if (s7TeamTactic('red') === 'long' && openForward.length > 0) {
+    return openForward.reduce((a, b) => (b.y > a.y ? b : a));
+  }
+
   // 空いている前方・15m以内 → いちばん前(ゴールに近い)の仲間へ
   const ofNear = openForward.filter(q => dist(q) < 15);
   if (ofNear.length > 0) return ofNear.reduce((a, b) => (b.y > a.y ? b : a));
@@ -1831,8 +1963,10 @@ function s7RedChoosePassTarget(p) {
 }
 
 function s7UpdateRedAttack(dt) {
+  const T = S7_TACTIC_PARAMS[s7TeamTactic('red')];
   for (const p of s7RedDF) {
     let tx, ty;
+    let speed = s7RedSpeed(DF_SPEED);
     if (ball.owner === p) {
       // ドリブルで前進(深い位置ではゴールへ向かう)しつつ、時間が来たらパスかシュート
       p.holdTimer += dt;
@@ -1869,11 +2003,18 @@ function s7UpdateRedAttack(dt) {
         if (d < nd) { nd = d; nearest = q; }
       }
       if (nearest === p) { tx = ball.x; ty = ball.y; }
-      else { [tx, ty] = s7RedAttackSpot(p); }
-    } else {
-      [tx, ty] = s7RedAttackSpot(p);
     }
-    moveToward(p, tx, ty, s7RedSpeed(DF_SPEED), dt);
+    if (tx === undefined) {
+      // 中央突破: FWの裏抜けラン
+      if (T.runs && p.role === 'FW') {
+        const run = s7UpdateRun(p, dt, 'red');
+        if (run) { [tx, ty] = run; speed = s7RedSpeed(DF_SPEED) * 1.2; }
+      }
+      if (tx === undefined) [tx, ty] = s7RedAttackSpot(p);
+      // カウンター: 奪った直後の数秒間、FWは全力で駆け上がる
+      if (T.sprint && p.role === 'FW' && S7.redCounterT > 0) speed = s7RedSpeed(DF_SPEED) * 1.25;
+    }
+    moveToward(p, tx, ty, speed, dt);
   }
 }
 
@@ -1883,32 +2024,58 @@ function s7BlueDefBase(p) {
   return [p.baseX, S7F.h * yMap[p.role]];
 }
 
-function s7BlueDefendAI(p, dt) {
-  let tx, ty;
-  let sprint = false;
+// 青の守備(集結半径ベース): 守備基準位置がボールから「まもりの はんけい」内に
+// あるAIだけが反応し、プレス役1人+カバー役1人がボールへ。残りはラインに戻って守る
+function s7UpdateBlueDefense(dt) {
+  const radius = s7BlueGatherRadius();
+  const aiBlues = s7Blue.filter(p => p !== controlledPlayer);
 
-  // 一番近い青AIを求める(操作中の選手は除く: プレイヤー自身が判断する)
+  const active = aiBlues.filter(p => {
+    const [bx, by] = s7BlueDefBase(p);
+    return Math.hypot(ball.x - bx, ball.y - by) < radius;
+  });
+  let presser = null, pd = Infinity;
+  for (const p of active) {
+    const d = Math.hypot(ball.x - p.x, ball.y - p.y);
+    if (d < pd) { pd = d; presser = p; }
+  }
+  let cover = null, cd = Infinity;
+  for (const p of active) {
+    if (p === presser) continue;
+    const d = Math.hypot(ball.x - p.x, ball.y - p.y);
+    if (d < cd) { cd = d; cover = p; }
+  }
+
+  // フリーボールはいちばん近いAIが拾いに行く
   let nearest = null, nd = Infinity;
-  for (const q of s7Blue) {
-    if (q === controlledPlayer) continue;
+  for (const q of aiBlues) {
     const d = Math.hypot(ball.x - q.x, ball.y - q.y);
     if (d < nd) { nd = d; nearest = q; }
   }
 
-  if (!ball.owner && !ball.receiver && nearest === p) {
-    // フリーボール: 拾いに行く
-    tx = ball.x; ty = ball.y;
-  } else if (nearest === p && ball.y > S7F.h * 0.35) {
-    // ボールが自陣側に入ってきたら一番近い1人だけプレス
-    tx = ball.x; ty = ball.y;
-  } else {
-    // 素早く自陣の守備ラインに戻る(DF/MF/FWの横一列)
-    const [bx, by] = s7BlueDefBase(p);
-    tx = bx + (ball.x - bx) * 0.25;
-    ty = by + (ball.y - by) * 0.1;
-    sprint = Math.hypot(tx - p.x, ty - p.y) > 6;
+  for (const p of aiBlues) {
+    let tx, ty;
+    let sprint = false;
+    if (!ball.owner && !ball.receiver && nearest === p) {
+      tx = ball.x; ty = ball.y;
+    } else if (p === presser) {
+      tx = ball.x; ty = ball.y;
+    } else if (p === cover) {
+      // カバー役: ボールと自ゴール(下)の間に立つ
+      const gx = S7F.w / 2, gy = S7F.h;
+      const dx = gx - ball.x, dy = gy - ball.y;
+      const len = Math.hypot(dx, dy) || 1;
+      tx = ball.x + dx / len * 2.8;
+      ty = ball.y + dy / len * 2.8;
+    } else {
+      // 素早く自陣の守備ラインに戻る(DF/MF/FWの横一列)
+      const [bx, by] = s7BlueDefBase(p);
+      tx = bx + (ball.x - bx) * 0.25;
+      ty = by + (ball.y - by) * 0.1;
+      sprint = Math.hypot(tx - p.x, ty - p.y) > 6;
+    }
+    moveToward(p, tx, ty, sprint ? AI_SPEED * 1.25 : AI_SPEED, dt);
   }
-  moveToward(p, tx, ty, sprint ? AI_SPEED * 1.25 : AI_SPEED, dt);
 }
 
 function s7Update(dt) {
@@ -1923,6 +2090,8 @@ function s7Update(dt) {
   }
 
   if (S7.stealCooldown > 0) S7.stealCooldown -= dt;
+  if (S7.blueCounterT > 0) S7.blueCounterT -= dt;
+  if (S7.redCounterT > 0) S7.redCounterT -= dt;
 
   // ユーザー入力(ボールを持っている青選手を直接操作する)
   let ix = 0, iy = 0;
@@ -1946,10 +2115,13 @@ function s7Update(dt) {
   }
 
   // AI: ボールを保持しているチームが攻撃、相手は守備(攻守の切り替え)
-  for (const p of s7Blue) {
-    if (p === controlledPlayer) continue;
-    if (S7.attacker === 'blue') s7AttackAI(p, dt);
-    else s7BlueDefendAI(p, dt);
+  if (S7.attacker === 'blue') {
+    for (const p of s7Blue) {
+      if (p === controlledPlayer) continue;
+      s7AttackAI(p, dt);
+    }
+  } else {
+    s7UpdateBlueDefense(dt);
   }
   s7BlueGKAI(dt);
   s7RedGKAI(dt);
@@ -2535,7 +2707,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v21)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v22)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -3148,10 +3320,10 @@ function s7DrawHUD() {
   }
   ctx.fillText(hint, window.innerWidth / 2, 50);
 
-  // スコア + 攻守 + 残り時間(左上)
+  // スコア + 攻守 + 残り時間 + 作戦(左上)
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
   ctx.beginPath();
-  ctx.roundRect(10, 70, 160, 82, 10);
+  ctx.roundRect(10, 70, 160, 104, 10);
   ctx.fill();
   ctx.fillStyle = '#ffe14d';
   ctx.font = 'bold 15px sans-serif';
@@ -3164,6 +3336,9 @@ function s7DrawHUD() {
   const mins = Math.floor(secs / 60);
   ctx.fillStyle = secs <= 10 ? '#ff8080' : '#ffffff';
   ctx.fillText('のこり ' + mins + ':' + String(secs % 60).padStart(2, '0'), 22, 138);
+  ctx.fillStyle = '#c9e8ff';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.fillText('さくせん: ' + S7_TACTICS[S7.blueTacticIdx].label, 22, 160);
 
   drawTiltButton();
   drawToast();
@@ -3213,12 +3388,12 @@ function s7DrawPauseMenu() {
     ctx.fillText(row.label, bx + 14, by + bh / 2 + 5);
 
     ctx.fillStyle = 'rgba(255,225,77,0.92)';
-    const pillW = 96, pillH = 32;
+    const pillW = 112, pillH = 30;
     ctx.beginPath();
     ctx.roundRect(bx + bw - pillW - 8, by + (bh - pillH) / 2, pillW, pillH, 8);
     ctx.fill();
     ctx.fillStyle = '#553c00';
-    ctx.font = 'bold 14px sans-serif';
+    ctx.font = 'bold 12px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(row.values[row.get()] + ' ▸', bx + bw - pillW / 2 - 8, by + bh / 2 + 5);
   });
@@ -3353,12 +3528,12 @@ function drawS7SetupScreen() {
     // 現在の値(タップで切り替わることが分かるように矢印を付ける)
     const value = row.values[row.get()];
     ctx.fillStyle = 'rgba(255,225,77,0.92)';
-    const pillW = 96, pillH = 32;
+    const pillW = 112, pillH = 30;
     ctx.beginPath();
     ctx.roundRect(bx + bw - pillW - 8, by + (bh - pillH) / 2, pillW, pillH, 8);
     ctx.fill();
     ctx.fillStyle = '#553c00';
-    ctx.font = 'bold 14px sans-serif';
+    ctx.font = 'bold 12px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(value + ' ▸', bx + bw - pillW / 2 - 8, by + bh / 2 + 5);
   });
@@ -3409,8 +3584,8 @@ function drawS7ResultScreen() {
 
   ctx.font = '14px sans-serif';
   ctx.fillStyle = '#cccccc';
-  ctx.fillText('せってい: ' + S7_SETTING_ROWS[0].values[S7.durationIdx] +
-               ' / はんけい ' + S7_SETTING_ROWS[1].values[S7.gatherRadiusIdx] +
+  ctx.fillText('さくせん: ' + S7_TACTICS[S7.blueTacticIdx].label +
+               ' / あいて: ' + (S7_TACTICS.find(t => t.key === S7.redTacticKey) || S7_TACTICS[0]).label +
                ' / ' + S7_STRENGTH[S7.strengthIdx].label, cx, window.innerHeight * 0.32);
 
   const [rbx, rby, rbw, rbh] = replayButtonRect();
