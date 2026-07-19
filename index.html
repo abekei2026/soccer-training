@@ -174,7 +174,11 @@ const S7 = {
   state: 'play',    // 'play' / 'goal'
   timer: 0,
   message: '',
-  score: 0
+  score: 0,          // 青(あなた)の得点
+  redScore: 0,       // 赤(あいて)の得点
+  attacker: 'blue',  // 今ボールを保持しているチーム(攻守の切り替え)
+  nextKickoff: 'blue',
+  stealCooldown: 0   // 奪い合いの直後にすぐ奪い返せないようにする
 };
 
 function s7MakeBlue(id, x, y, role, minY, maxY, pushDist) {
@@ -188,12 +192,12 @@ function s7MakeBlue(id, x, y, role, minY, maxY, pushDist) {
 
 // 青: フィールドプレーヤー6人(DF2/MF2/FW2) + GK。攻めるゴールは上(y=0)
 const s7Blue = [
-  s7MakeBlue(30, S7F.w * 0.28, S7F.h * 0.80, 'DF', S7F.h * 0.60, S7F.h * 0.95, 9),
-  s7MakeBlue(31, S7F.w * 0.72, S7F.h * 0.80, 'DF', S7F.h * 0.60, S7F.h * 0.95, 9),
-  s7MakeBlue(32, S7F.w * 0.28, S7F.h * 0.55, 'MF', S7F.h * 0.32, S7F.h * 0.78, 7),
-  s7MakeBlue(33, S7F.w * 0.72, S7F.h * 0.55, 'MF', S7F.h * 0.32, S7F.h * 0.78, 7),
-  s7MakeBlue(34, S7F.w * 0.32, S7F.h * 0.30, 'FW', S7F.h * 0.06, S7F.h * 0.55, 3),
-  s7MakeBlue(35, S7F.w * 0.68, S7F.h * 0.30, 'FW', S7F.h * 0.06, S7F.h * 0.55, 3)
+  s7MakeBlue(30, S7F.w * 0.28, S7F.h * 0.80, 'DF', S7F.h * 0.60, S7F.h * 0.95, 16),
+  s7MakeBlue(31, S7F.w * 0.72, S7F.h * 0.80, 'DF', S7F.h * 0.60, S7F.h * 0.95, 16),
+  s7MakeBlue(32, S7F.w * 0.28, S7F.h * 0.55, 'MF', S7F.h * 0.32, S7F.h * 0.78, 12),
+  s7MakeBlue(33, S7F.w * 0.72, S7F.h * 0.55, 'MF', S7F.h * 0.32, S7F.h * 0.78, 12),
+  s7MakeBlue(34, S7F.w * 0.32, S7F.h * 0.30, 'FW', S7F.h * 0.06, S7F.h * 0.55, 4),
+  s7MakeBlue(35, S7F.w * 0.68, S7F.h * 0.30, 'FW', S7F.h * 0.06, S7F.h * 0.55, 4)
 ];
 const s7BlueGK = (() => {
   const p = makePlayer(36, S7F.w / 2, S7F.h - 1.5, false);
@@ -1298,9 +1302,11 @@ function s7Start() {
   MATCH.mode = 's7';
   APP.screen = 'play';
   S7.score = 0;
-  S7.state = 'play';
+  S7.redScore = 0;
+  S7.stealCooldown = 0;
   judge.active = false;
-  s7Kickoff();
+  s7Kickoff('blue');
+  S7.state = 'play';
   S7.cam.x = ball.x;
   S7.cam.y = ball.y;
   sfxWhistle();
@@ -1312,19 +1318,34 @@ function s7ExitToTitle() {
   APP.screen = 'title';
 }
 
-function s7Kickoff() {
+function s7Kickoff(startTeam) {
   for (const p of s7Blue) {
     p.x = p.baseX; p.y = p.baseY;
     p.vx = 0; p.vy = 0; p.fx = 0; p.fy = -1;
+  }
+  for (const p of s7RedDF) {
+    p.x = p.homeX; p.y = p.homeY;
+    p.vx = 0; p.vy = 0; p.fx = 0; p.fy = 1;
   }
   s7BlueGK.x = S7F.w / 2; s7BlueGK.y = S7F.h - 1.5;
   s7BlueGK.vx = 0; s7BlueGK.vy = 0; s7BlueGK.fx = 0; s7BlueGK.fy = -1;
   s7RedGK.x = S7F.w / 2; s7RedGK.y = 1.5;
   s7RedGK.vx = 0; s7RedGK.vy = 0; s7RedGK.fx = 0; s7RedGK.fy = 1;
 
-  // センターサークルからキックオフ(MFのひとりがボールを持つ)
-  const kicker = s7Blue[2];
-  kicker.x = S7F.w / 2; kicker.y = S7F.h / 2 + 1;
+  // センターサークルからキックオフ(得点された側のチームから)
+  let kicker;
+  if (startTeam === 'red') {
+    kicker = s7RedDF[4];   // 前列まんなかのDF
+    kicker.x = S7F.w / 2; kicker.y = S7F.h / 2 - 1;
+    kicker.holdTimer = 0;
+    kicker.holdLimit = 0.9 + Math.random() * 0.6;
+    controlledPlayer = s7Blue[2];
+  } else {
+    kicker = s7Blue[2];
+    kicker.x = S7F.w / 2; kicker.y = S7F.h / 2 + 1;
+    controlledPlayer = kicker;
+  }
+  S7.attacker = startTeam;
   ball.owner = kicker;
   ball.receiver = null;
   ball.lastKicker = null;
@@ -1332,34 +1353,19 @@ function s7Kickoff() {
   ball.vx = 0; ball.vy = 0;
   ball.isShot = false;
   ball.trackedPass = null;
-  ball.x = kicker.x; ball.y = kicker.y - 0.75;
-  controlledPlayer = kicker;
+  ball.x = kicker.x;
+  ball.y = kicker.y + (startTeam === 'red' ? 0.75 : -0.75);
+  S7.stealCooldown = 1.0;
 }
 
 function s7GiveBall(p) {
-  if (p.team === 'red' && !p.isGK) {
-    // 赤のフィールドプレーヤーが奪った: すぐ前方(ハーフウェー方向)へクリアする
-    // (このモードの赤は守備専用。ドリブル攻撃はしない)
-    const tx = 4 + Math.random() * (S7F.w - 8);
-    const ty = Math.min(S7F.h - 4, p.y + 10 + Math.random() * 6);
-    const dx = tx - p.x, dy = ty - p.y;
-    const len = Math.hypot(dx, dy) || 1;
-    ball.owner = null;
-    ball.receiver = null;
-    ball.isShot = false;
-    ball.vx = dx / len * 10;
-    ball.vy = dy / len * 10;
-    ball.x = p.x; ball.y = p.y;
-    ball.lastKicker = p;
-    ball.kickCooldown = KICK_COOLDOWN;
-    sfxLost();
-    return;
-  }
-
+  const prevAttacker = S7.attacker;
   ball.owner = p;
   ball.vx = 0; ball.vy = 0;
   ball.receiver = null;
   ball.isShot = false;
+  S7.attacker = p.team;   // ボールを持っているチームが攻撃側(攻守の切り替え)
+
   if (p.team === 'blue' && !p.isGK) {
     // ボールを持った味方に操作を渡す
     controlledPlayer = p;
@@ -1368,7 +1374,14 @@ function s7GiveBall(p) {
     p.holdTimer = 0;
     p.holdLimit = 0.9 + Math.random() * 0.6;
   }
-  sfxPass();
+
+  if (prevAttacker !== p.team) {
+    judge.active = p.team === 'blue' ? judge.active : false;
+    showToast(p.team === 'blue' ? 'こうげき スタート!' : 'あいての こうげき! もどって まもろう!');
+    sfxLost();
+  } else {
+    sfxPass();
+  }
 }
 
 function s7Goal() {
@@ -1376,10 +1389,23 @@ function s7Goal() {
   S7.state = 'goal';
   S7.timer = 1.8;
   S7.message = 'ゴーール!';
+  S7.nextKickoff = 'red';   // 決められた側からキックオフ
   ball.owner = null; ball.receiver = null;
   ball.vx = 0; ball.vy = 0;
   judge.active = false;
   sfxGoal();
+}
+
+function s7RedGoal() {
+  S7.redScore++;
+  S7.state = 'goal';
+  S7.timer = 1.8;
+  S7.message = 'ゴールされた…';
+  S7.nextKickoff = 'blue';
+  ball.owner = null; ball.receiver = null;
+  ball.vx = 0; ball.vy = 0;
+  judge.active = false;
+  sfxLost();
 }
 
 // パスコースのリスク判定(しあいモード用: 赤チーム相手)
@@ -1452,8 +1478,17 @@ function s7BlueGKAI(dt) {
     }
     return;
   }
-  const gtx = Math.max(S7F.w / 2 - 3, Math.min(S7F.w / 2 + 3, ball.x));
-  moveToward(s7BlueGK, gtx, S7F.h - 1.5, GK_SPEED * 0.6, dt);
+  // 赤のシュートの軌道を予測して先回り
+  let targetX = ball.x;
+  if (!ball.owner && ball.vy > 0.01) {
+    const t = (S7F.h - 1.5 - ball.y) / ball.vy;
+    if (t > 0 && isFinite(t)) targetX = ball.x + ball.vx * t;
+  }
+  const goalCx = S7F.w / 2;
+  const postPad = s7BlueGK.radius * 0.4;
+  const gtx = Math.max(goalCx - S7F.goalW / 2 + postPad,
+              Math.min(goalCx + S7F.goalW / 2 - postPad, targetX));
+  moveToward(s7BlueGK, gtx, S7F.h - 1.5, GK_SPEED, dt);
 }
 
 function s7RedGKAI(dt) {
@@ -1497,89 +1532,168 @@ function s7GoalSideOf(attacker) {
   return [tx, ty];
 }
 
-// ホームエリアの基準位置(ボールサイドへ0.4エリア幅だけスライドする)
+// ホームエリアの基準位置。ボールサイドへスライドし、縦方向にも少しコンパクトに寄る
 function s7DefHomeSlide(p) {
-  const slide = S7_AREA_W * 0.4;
-  const dir = ball.x > p.homeX ? 1 : -1;
-  let tx = p.homeX + dir * slide;
-  tx = Math.max(1.5, Math.min(S7F.w - 1.5, tx));
-  return [tx, p.homeY];
+  const slideX = Math.max(-S7_AREA_W * 0.45, Math.min(S7_AREA_W * 0.45, (ball.x - p.homeX) * 0.3));
+  const slideY = Math.max(-3, Math.min(3, (ball.y - p.homeY) * 0.15));
+  const tx = Math.max(1.5, Math.min(S7F.w - 1.5, p.homeX + slideX));
+  const ty = p.homeY + slideY;
+  return [tx, ty];
 }
 
-// 集結半径の外にいるDFに、なるべく重複なく近い攻撃選手を割り当てる
-function s7AssignMarks(outsideDFs) {
-  const pairs = [];
-  for (const p of outsideDFs) {
-    for (const a of s7Blue) {
-      pairs.push({ p, a, d: Math.hypot(a.x - p.homeX, a.y - p.homeY) });
+// 自分のホームエリアの中にいる攻撃選手(ボール保持者以外)を探す
+function s7AttackerInMyArea(p) {
+  const x0 = S7_AREA_W * p.areaCol, x1 = x0 + S7_AREA_W;
+  const y0 = p.areaRow === 0 ? 0 : S7F.h * 0.25;
+  const y1 = p.areaRow === 0 ? S7F.h * 0.25 : S7F.h * 0.5;
+  let best = null, bd = Infinity;
+  for (const a of s7Blue) {
+    if (ball.owner === a) continue;   // 保持者はプレス役の担当
+    if (a.x >= x0 && a.x < x1 && a.y >= y0 && a.y < y1) {
+      const d = Math.hypot(a.x - p.homeX, a.y - p.homeY);
+      if (d < bd) { bd = d; best = a; }
     }
   }
-  pairs.sort((x, y) => x.d - y.d);
-  const usedP = new Set(), usedA = new Set(), assignment = new Map();
-  for (const { p, a } of pairs) {
-    if (usedP.has(p) || usedA.has(a)) continue;
-    assignment.set(p, a);
-    usedP.add(p); usedA.add(a);
-  }
-  return assignment;
+  return best;
 }
 
+// ゾーンディフェンス: ボールに行くのはプレス役1人+カバー役1人だけ。
+// 残りは自分のエリアを守り、エリア内の攻撃選手をマークする(団子にならない)
 function s7UpdateRedDefense(dt) {
   const radius = s7GatherRadius();
-  const inRadius = s7RedDF.filter(p => Math.hypot(ball.x - p.homeX, ball.y - p.homeY) < radius);
-  const outside = s7RedDF.filter(p => !inRadius.includes(p));
+  // ボールに反応するのはホームエリアがボールに近いDFだけ
+  const active = s7RedDF.filter(p => Math.hypot(ball.x - p.homeX, ball.y - p.homeY) < radius);
 
-  // 集結半径内: ボール保持者に一番近いDFがチャレンジ役(プレス)
   let presser = null, pd = Infinity;
-  for (const p of inRadius) {
+  for (const p of active) {
     const d = Math.hypot(ball.x - p.x, ball.y - p.y);
     if (d < pd) { pd = d; presser = p; }
   }
-
-  const marks = s7AssignMarks(outside);
+  let cover = null, cd = Infinity;
+  for (const p of active) {
+    if (p === presser) continue;
+    const d = Math.hypot(ball.x - p.x, ball.y - p.y);
+    if (d < cd) { cd = d; cover = p; }
+  }
 
   for (const p of s7RedDF) {
     let tx, ty;
-    if (inRadius.includes(p)) {
-      if (p === presser) {
-        // チャレンジ役: ボール保持者へ直接プレス
-        tx = ball.x; ty = ball.y;
-      } else {
-        // カバー役: 一番近い攻撃選手へのパスコースを切る位置(ボールとその選手の中間)に立つ
-        let nearest = null, nd = Infinity;
-        for (const a of s7Blue) {
-          const d = Math.hypot(a.x - p.x, a.y - p.y);
-          if (d < nd) { nd = d; nearest = a; }
-        }
-        if (nearest) {
-          tx = (ball.x + nearest.x) / 2;
-          ty = (ball.y + nearest.y) / 2;
-        } else {
-          [tx, ty] = s7DefHomeSlide(p);
-        }
-      }
+    if (p === presser) {
+      // チャレンジ役: ボール保持者へプレス
+      tx = ball.x; ty = ball.y;
+    } else if (p === cover) {
+      // カバー役: ボールと自ゴールの間、プレス役の少し後ろに立つ
+      const gx = S7F.w / 2, gy = 0;
+      const dx = gx - ball.x, dy = gy - ball.y;
+      const len = Math.hypot(dx, dy) || 1;
+      tx = ball.x + dx / len * 2.8;
+      ty = ball.y + dy / len * 2.8;
     } else {
-      const mark = marks.get(p);
-      if (mark) {
-        [tx, ty] = s7GoalSideOf(mark);
-      } else {
-        [tx, ty] = s7DefHomeSlide(p);
-      }
+      // ゾーンを守る: エリア内に攻撃選手がいればゴールサイドでマーク、いなければ基準位置
+      const m = s7AttackerInMyArea(p);
+      if (m) [tx, ty] = s7GoalSideOf(m);
+      else [tx, ty] = s7DefHomeSlide(p);
     }
     moveToward(p, tx, ty, versusSpeed('red', DF_SPEED), dt);
   }
+}
+
+// ---------- しあいモード: 赤の攻撃 / 青の帰陣・守備 ----------
+
+// 赤の攻撃時の基準位置(前列はハーフウェーを越えて攻め上がる)
+function s7RedAttackSpot(p) {
+  const baseY = p.areaRow === 1 ? S7F.h * 0.62 : S7F.h * 0.38;
+  let tx = p.homeX + (ball.x - p.homeX) * 0.3;
+  let ty = baseY + (ball.y - baseY) * 0.3;
+  tx = Math.max(1.5, Math.min(S7F.w - 1.5, tx));
+  ty = Math.max(S7F.h * 0.1, Math.min(S7F.h - 4, ty));
+  return [tx, ty];
+}
+
+function s7UpdateRedAttack(dt) {
+  for (const p of s7RedDF) {
+    let tx, ty;
+    if (ball.owner === p) {
+      // ドリブルで前進しつつ、時間が来たらパスかシュート
+      p.holdTimer += dt;
+      tx = p.x; ty = p.y + 2;
+      if (p.holdTimer >= p.holdLimit) {
+        if (p.y > S7F.h - 14) {
+          const goalCx = S7F.w / 2;
+          const aimX = goalCx + (Math.random() * 2 - 1) * (S7F.goalW / 2 - 0.5);
+          versusShoot(p, aimX, S7F.h);
+        } else {
+          // 前(青ゴール側)にいる仲間を優先してパス
+          const forward = s7RedDF.filter(q => q !== p && q.y > p.y - 2);
+          const targets = forward.length > 0 ? forward : s7RedDF.filter(q => q !== p);
+          const to = targets[Math.floor(Math.random() * targets.length)];
+          versusPass(p, to);
+        }
+      }
+    } else if (ball.receiver === p && !ball.owner) {
+      tx = ball.x + ball.vx * 0.2;
+      ty = ball.y + ball.vy * 0.2;
+    } else if (!ball.owner && !ball.receiver) {
+      let nearest = null, nd = Infinity;
+      for (const q of s7RedDF) {
+        const d = Math.hypot(ball.x - q.x, ball.y - q.y);
+        if (d < nd) { nd = d; nearest = q; }
+      }
+      if (nearest === p) { tx = ball.x; ty = ball.y; }
+      else { [tx, ty] = s7RedAttackSpot(p); }
+    } else {
+      [tx, ty] = s7RedAttackSpot(p);
+    }
+    moveToward(p, tx, ty, versusSpeed('red', DF_SPEED), dt);
+  }
+}
+
+// 青の守備時の基準位置(役割ごとの横一列ライン)
+function s7BlueDefBase(p) {
+  const yMap = { DF: 0.80, MF: 0.63, FW: 0.48 };
+  return [p.baseX, S7F.h * yMap[p.role]];
+}
+
+function s7BlueDefendAI(p, dt) {
+  let tx, ty;
+  let sprint = false;
+
+  // 一番近い青AIを求める(操作中の選手は除く: プレイヤー自身が判断する)
+  let nearest = null, nd = Infinity;
+  for (const q of s7Blue) {
+    if (q === controlledPlayer) continue;
+    const d = Math.hypot(ball.x - q.x, ball.y - q.y);
+    if (d < nd) { nd = d; nearest = q; }
+  }
+
+  if (!ball.owner && !ball.receiver && nearest === p) {
+    // フリーボール: 拾いに行く
+    tx = ball.x; ty = ball.y;
+  } else if (nearest === p && ball.y > S7F.h * 0.35) {
+    // ボールが自陣側に入ってきたら一番近い1人だけプレス
+    tx = ball.x; ty = ball.y;
+  } else {
+    // 素早く自陣の守備ラインに戻る(DF/MF/FWの横一列)
+    const [bx, by] = s7BlueDefBase(p);
+    tx = bx + (ball.x - bx) * 0.25;
+    ty = by + (ball.y - by) * 0.1;
+    sprint = Math.hypot(tx - p.x, ty - p.y) > 6;
+  }
+  moveToward(p, tx, ty, sprint ? AI_SPEED * 1.25 : AI_SPEED, dt);
 }
 
 function s7Update(dt) {
   if (S7.state !== 'play') {
     S7.timer -= dt;
     if (S7.timer <= 0) {
-      s7Kickoff();
+      s7Kickoff(S7.nextKickoff);
       S7.state = 'play';
     }
     s7UpdateCam(dt);
     return;
   }
+
+  if (S7.stealCooldown > 0) S7.stealCooldown -= dt;
 
   // ユーザー入力(ボールを持っている青選手を直接操作する)
   let ix = 0, iy = 0;
@@ -1602,14 +1716,16 @@ function s7Update(dt) {
     controlledPlayer.vx = 0; controlledPlayer.vy = 0;
   }
 
-  // 味方AI + 両GK + 赤ゾーンディフェンス
+  // AI: ボールを保持しているチームが攻撃、相手は守備(攻守の切り替え)
   for (const p of s7Blue) {
     if (p === controlledPlayer) continue;
-    s7AttackAI(p, dt);
+    if (S7.attacker === 'blue') s7AttackAI(p, dt);
+    else s7BlueDefendAI(p, dt);
   }
   s7BlueGKAI(dt);
   s7RedGKAI(dt);
-  s7UpdateRedDefense(dt);
+  if (S7.attacker === 'red') s7UpdateRedAttack(dt);
+  else s7UpdateRedDefense(dt);
 
   // 移動 + コート内クランプ
   for (const p of s7All) {
@@ -1627,6 +1743,19 @@ function s7Update(dt) {
     ball.x = o.x + o.fx * 0.75;
     ball.y = o.y + o.fy * 0.75;
     ball.vx = 0; ball.vy = 0;
+
+    // 奪い合い: 相手チームの選手がボールに近づいたら奪う(直後の奪い返しは少しの間できない)
+    if (!o.isGK && S7.stealCooldown <= 0) {
+      const stealers = o.team === 'blue' ? [...s7RedDF, s7RedGK] : [...s7Blue, s7BlueGK];
+      for (const d of stealers) {
+        const dist = Math.hypot(ball.x - d.x, ball.y - d.y);
+        if (dist < STEAL_DIST) {
+          s7GiveBall(d);
+          S7.stealCooldown = 0.8;
+          break;
+        }
+      }
+    }
   } else {
     ball.x += ball.vx * dt;
     ball.y += ball.vy * dt;
@@ -1638,11 +1767,15 @@ function s7Update(dt) {
       if (Math.abs(ball.x - goalCx) < S7F.goalW / 2) { s7Goal(); return; }
       ball.y = ball.radius; ball.vy *= -0.6;
     }
-    if (ball.y > S7F.h - ball.radius) { ball.y = S7F.h - ball.radius; ball.vy *= -0.6; }
+    // 下のゴール(赤の得点)
+    if (ball.y > S7F.h - ball.radius) {
+      if (Math.abs(ball.x - goalCx) < S7F.goalW / 2) { s7RedGoal(); return; }
+      ball.y = S7F.h - ball.radius; ball.vy *= -0.6;
+    }
     if (ball.x < ball.radius)         { ball.x = ball.radius;         ball.vx *= -0.6; }
     if (ball.x > S7F.w - ball.radius) { ball.x = S7F.w - ball.radius; ball.vx *= -0.6; }
 
-    // ボールを拾う判定(青フィールドプレーヤー → GK の順)
+    // ボールを拾う判定
     for (const p of s7All) {
       if (p === ball.lastKicker && ball.kickCooldown > 0) continue;
       const d = Math.hypot(ball.x - p.x, ball.y - p.y);
@@ -2173,7 +2306,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v16)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v17)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -2778,15 +2911,18 @@ function s7DrawHUD() {
   }
   ctx.fillText(hint, window.innerWidth / 2, 50);
 
-  // スコア(左上)
+  // スコア + 攻守表示(左上)
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
   ctx.beginPath();
-  ctx.roundRect(10, 70, 110, 38, 10);
+  ctx.roundRect(10, 70, 160, 58, 10);
   ctx.fill();
   ctx.fillStyle = '#ffe14d';
-  ctx.font = 'bold 16px sans-serif';
+  ctx.font = 'bold 15px sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillText('ゴール ' + S7.score, 24, 95);
+  ctx.fillText('あなた ' + S7.score + ' - ' + S7.redScore + ' あいて', 22, 92);
+  ctx.font = 'bold 13px sans-serif';
+  ctx.fillStyle = S7.attacker === 'blue' ? '#8fffb0' : '#ffb3b3';
+  ctx.fillText(S7.attacker === 'blue' ? 'こうげき ちゅう!' : 'しゅび ちゅう!', 22, 114);
 
   drawTiltButton();
   drawToast();
