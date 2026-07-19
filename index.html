@@ -1689,34 +1689,92 @@ function s7UpdateRedDefense(dt) {
 
 // ---------- しあいモード: 赤の攻撃 / 青の帰陣・守備 ----------
 
-// 赤の攻撃時の基準位置(前列はハーフウェーを越えて攻め上がる)
+// 赤の攻撃時のポジション: 青と同じく「ボールの高さについていく」方式。
+// 前列はボールより前(青ゴール側)へ走り込み、攻撃が深まるほど
+// ワイドのレーンからゴール幅へ絞り込んでペナルティエリアに押し寄せる
 function s7RedAttackSpot(p) {
-  const baseY = p.areaRow === 1 ? S7F.h * 0.62 : S7F.h * 0.38;
-  let tx = p.homeX + (ball.x - p.homeX) * 0.3;
-  let ty = baseY + (ball.y - baseY) * 0.3;
+  const goalCx = S7F.w / 2;
+  const offset = p.areaRow === 1 ? 7 : -6;                   // +y = 青ゴール方向
+  const maxY   = p.areaRow === 1 ? S7F.h - 3 : S7F.h - 12;   // 前列はゴール前まで入る
+  const minY   = p.areaRow === 1 ? S7F.h * 0.30 : S7F.h * 0.18;
+  let ty = ball.y + offset;
+  ty = Math.max(minY, Math.min(maxY, ty));
+
+  // 攻撃の深さ 0〜1(ボールが青ゴールに近いほど1)
+  const deep = Math.max(0, Math.min(1, (ball.y - S7F.h * 0.5) / (S7F.h * 0.3)));
+  const squeeze = p.areaRow === 1 ? 0.55 : 0.3;
+  let tx = p.homeX + (goalCx - p.homeX) * deep * squeeze
+         + (ball.x - p.homeX) * 0.25 * (1 - deep);
   tx = Math.max(1.5, Math.min(S7F.w - 1.5, tx));
-  ty = Math.max(S7F.h * 0.1, Math.min(S7F.h - 4, ty));
   return [tx, ty];
+}
+
+// 赤のパスコースが青に切られていないか(青チーム相手のコース判定)
+function s7RedLaneRisky(from, to) {
+  const blues = [...s7Blue, s7BlueGK];
+  const abx = to.x - from.x, aby = to.y - from.y;
+  const abLen2 = abx * abx + aby * aby || 1;
+  for (const d of blues) {
+    const apx = d.x - from.x, apy = d.y - from.y;
+    let t = (apx * abx + apy * aby) / abLen2;
+    t = Math.max(0, Math.min(1, t));
+    const cx = from.x + abx * t, cy = from.y + aby * t;
+    if (t > 0.08 && t < 0.97 && Math.hypot(d.x - cx, d.y - cy) < LANE_RISK_DIST) return true;
+  }
+  return false;
+}
+
+// パス先の選択: コースが空いていて距離が近め(飛行中にカットされにくい)の
+// 前方(青ゴール側)の仲間を最優先する
+function s7RedChoosePassTarget(p) {
+  const dist = q => Math.hypot(q.x - p.x, q.y - p.y);
+  const mates = s7RedDF.filter(q => q !== p);
+  const forward = mates.filter(q => q.y > p.y + 2);
+  const openForward = forward.filter(q => !s7RedLaneRisky(p, q));
+
+  // 空いている前方・15m以内 → いちばん前(ゴールに近い)の仲間へ
+  const ofNear = openForward.filter(q => dist(q) < 15);
+  if (ofNear.length > 0) return ofNear.reduce((a, b) => (b.y > a.y ? b : a));
+  // 空いている前方が遠くにしかいない → いちばん近いものへ
+  if (openForward.length > 0) return openForward.reduce((a, b) => (dist(b) < dist(a) ? b : a));
+  // ときどき強引に縦パス(カットされるリスク込み)
+  const fNear = forward.filter(q => dist(q) < 15);
+  if (fNear.length > 0 && Math.random() < 0.35) {
+    return fNear[Math.floor(Math.random() * fNear.length)];
+  }
+  // 横・後ろへの安全なつなぎ(近い順)
+  const openNear = mates.filter(q => !s7RedLaneRisky(p, q) && dist(q) < 15);
+  if (openNear.length > 0) return openNear.reduce((a, b) => (dist(b) < dist(a) ? b : a));
+  return mates.reduce((a, b) => (dist(b) < dist(a) ? b : a));
 }
 
 function s7UpdateRedAttack(dt) {
   for (const p of s7RedDF) {
     let tx, ty;
     if (ball.owner === p) {
-      // ドリブルで前進しつつ、時間が来たらパスかシュート
+      // ドリブルで前進(深い位置ではゴールへ向かう)しつつ、時間が来たらパスかシュート
       p.holdTimer += dt;
-      tx = p.x; ty = p.y + 2;
-      if (p.holdTimer >= p.holdLimit) {
-        if (p.y > S7F.h - 14) {
-          const goalCx = S7F.w / 2;
+      const goalCx = S7F.w / 2;
+      if (p.y > S7F.h * 0.6) {
+        tx = p.x + (goalCx - p.x) * 0.4; ty = p.y + 2;
+      } else {
+        tx = p.x; ty = p.y + 2;
+      }
+      // プレッシャーを受けたら早めにボールを離す。ゴール前でも判断を速くする
+      let pressured = false;
+      for (const b of s7Blue) {
+        if (Math.hypot(b.x - p.x, b.y - p.y) < 2.6) { pressured = true; break; }
+      }
+      let limit = p.holdLimit;
+      if (p.y > S7F.h - 16) limit = Math.min(limit, 0.55);
+      if (pressured) limit = Math.min(limit, 0.35);
+      if (p.holdTimer >= limit) {
+        if (p.y > S7F.h - 11) {
+          // ゴールが近い: シュート(遠すぎる位置からは撃たず、届く距離まで運ぶ)
           const aimX = goalCx + (Math.random() * 2 - 1) * (S7F.goalW / 2 - 0.5);
           versusShoot(p, aimX, S7F.h);
         } else {
-          // 前(青ゴール側)にいる仲間を優先してパス
-          const forward = s7RedDF.filter(q => q !== p && q.y > p.y - 2);
-          const targets = forward.length > 0 ? forward : s7RedDF.filter(q => q !== p);
-          const to = targets[Math.floor(Math.random() * targets.length)];
-          versusPass(p, to);
+          versusPass(p, s7RedChoosePassTarget(p));
         }
       }
     } else if (ball.receiver === p && !ball.owner) {
@@ -2395,7 +2453,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v19)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v20)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
