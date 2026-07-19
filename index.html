@@ -1423,21 +1423,14 @@ function s7LaneRisky(from, to) {
   return false;
 }
 
-// 攻撃が深いほど(ボールが相手ゴールに近いほど)チーム全体が押し上がる度合い 0〜1
-function s7TeamPush() {
-  const half = S7F.h / 2;
-  return Math.max(0, Math.min(1, (half - ball.y) / half));
-}
-
-// 役割の基準ポジションからボール方向へ寄る。攻撃が深いときは担当範囲ごと前へ押し上がる
+// 攻撃時のポジション: ボールの高さに役割ごとのオフセットでついていく。
+// ボールが前進すれば全員(DFも)どんどん押し上がり、攻撃で数的有利を作る
+const S7_ATK_OFFSET = { FW: -7, MF: 1, DF: 9 };   // ボールより前(-)/後ろ(+)の距離(m)
+const S7_ATK_MAX_Y  = { FW: 4,  MF: 7, DF: 12 };  // 相手ゴールへどこまで近づけるか
 function s7FormationSpot(p) {
-  const push = s7TeamPush() * (p.pushDist || 0);
-  const dynBaseY = p.baseY - push;
-  const dynMinY = p.minY - push;
-  const dynMaxY = p.maxY - push;
-  let tx = p.baseX + (ball.x - p.baseX) * 0.35;
-  let ty = dynBaseY + (ball.y - dynBaseY) * 0.4;
-  ty = Math.max(dynMinY, Math.min(dynMaxY, ty));
+  let ty = ball.y + S7_ATK_OFFSET[p.role];
+  ty = Math.max(S7_ATK_MAX_Y[p.role], Math.min(p.maxY, ty));
+  let tx = p.baseX + (ball.x - p.baseX) * 0.3;
   tx = Math.max(1.5, Math.min(S7F.w - 1.5, tx));
   return [tx, ty];
 }
@@ -1532,13 +1525,18 @@ function s7GoalSideOf(attacker) {
   return [tx, ty];
 }
 
-// ホームエリアの基準位置。ボールサイドへスライドし、縦方向にも少しコンパクトに寄る
+// ホームエリアの基準位置。ボールサイドへスライドし、
+// 相手が押し上げてくるほど守備ブロック全体をゴール側に下げて固める
 function s7DefHomeSlide(p) {
+  // ボールが赤陣に近づくほど 0→1(ハーフウェーより向こうなら0)
+  const t = Math.max(0, Math.min(1, 1 - ball.y / (S7F.h * 0.5)));
+  // 後列は 7.75m→4.5m、前列は 23.25m→11m までゴール側へ下がる
+  const dropTarget = p.areaRow === 0 ? 4.5 : 11;
+  const dropY = p.homeY - t * (p.homeY - dropTarget);
+
   const slideX = Math.max(-S7_AREA_W * 0.45, Math.min(S7_AREA_W * 0.45, (ball.x - p.homeX) * 0.3));
-  const slideY = Math.max(-3, Math.min(3, (ball.y - p.homeY) * 0.15));
   const tx = Math.max(1.5, Math.min(S7F.w - 1.5, p.homeX + slideX));
-  const ty = p.homeY + slideY;
-  return [tx, ty];
+  return [tx, dropY];
 }
 
 // 自分のホームエリアの中にいる攻撃選手(ボール保持者以外)を探す
@@ -2306,7 +2304,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v17)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v18)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
