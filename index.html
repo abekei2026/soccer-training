@@ -338,6 +338,11 @@ S7.giveGoT = 0;
 S7.aceCount = 0;            // スーパーエースの人数(FWに適用): 足が速くシュートも速い
 S7.passerCount = 0;         // スーパーパサーの人数(MFに適用): パスが速くて強い
 S7.helperCount = 0;         // さいきょうディフェンダーの人数(DFに適用): 足が速く体が大きくボール奪取範囲が広い
+S7.superGK = false;         // スーパーキーパー: 動きが速くゴールキックが相手コート中央まで飛ぶ
+S7.redAceCount = 0;         // あいてチームのスペシャル選手
+S7.redPasserCount = 0;
+S7.redHelperCount = 0;
+S7.redSuperGK = false;
 
 function s7BlueGatherRadius() {
   return S7_AREA_W * S7_GATHER_RADIUS_UNITS[S7.blueGatherRadiusIdx]
@@ -696,6 +701,16 @@ const S7_ROWS = {
     get: () => S7.passerCount, set: i => { S7.passerCount = i; } },
   helper: { label: 'さいきょうDF', values: ['なし', '1にん', '2にん'],
     get: () => S7.helperCount, set: i => { S7.helperCount = i; } },
+  superGK: { label: 'スーパーGK', values: ['なし', 'あり'],
+    get: () => S7.superGK ? 1 : 0, set: i => { S7.superGK = i === 1; } },
+  redAce: { label: 'あいてエース(FW)', values: ['なし', '1にん', '2にん'],
+    get: () => S7.redAceCount, set: i => { S7.redAceCount = i; } },
+  redPasser: { label: 'あいてパサー(MF)', values: ['なし', '1にん', '2にん'],
+    get: () => S7.redPasserCount, set: i => { S7.redPasserCount = i; } },
+  redHelper: { label: 'あいてさいきょうDF', values: ['なし', '1にん', '2にん'],
+    get: () => S7.redHelperCount, set: i => { S7.redHelperCount = i; } },
+  redSuperGK: { label: 'あいてスーパーGK', values: ['なし', 'あり'],
+    get: () => S7.redSuperGK ? 1 : 0, set: i => { S7.redSuperGK = i === 1; } },
   blueR: { label: 'じぶんの はんけい', values: ['1', '1.5', '2'],
     get: () => S7.blueGatherRadiusIdx, set: i => { S7.blueGatherRadiusIdx = i; } },
   redR: { label: 'あいての はんけい', values: ['1', '1.5', '2'],
@@ -708,7 +723,9 @@ const S7_ROWS = {
     get: () => S7.showRadius ? 0 : 1, set: i => { S7.showRadius = i === 0; } }
 };
 const S7_SETTING_PAGES = [
-  [S7_ROWS.duration, S7_ROWS.atk, S7_ROWS.def, S7_ROWS.redAtk, S7_ROWS.ace, S7_ROWS.passer, S7_ROWS.helper],
+  [S7_ROWS.duration, S7_ROWS.atk, S7_ROWS.def, S7_ROWS.redAtk],
+  [S7_ROWS.ace, S7_ROWS.passer, S7_ROWS.helper, S7_ROWS.superGK,
+   S7_ROWS.redAce, S7_ROWS.redPasser, S7_ROWS.redHelper, S7_ROWS.redSuperGK],
   [S7_ROWS.blueR, S7_ROWS.redR, S7_ROWS.strength, S7_ROWS.areas, S7_ROWS.radiusShow]
 ];
 S7.setupPage = 0;
@@ -904,7 +921,7 @@ function handleTap(sx, sy) {
         return;
       }
     }
-    if (inRect(sx, sy, s7SetupNavRect())) { sfxClick(); S7.setupPage = 1 - S7.setupPage; return; }
+    if (inRect(sx, sy, s7SetupNavRect())) { sfxClick(); S7.setupPage = (S7.setupPage + 1) % S7_SETTING_PAGES.length; return; }
     if (inRect(sx, sy, s7StartMatchButtonRect())) { sfxClick(); s7Start(); return; }
     if (inRect(sx, sy, s7SetupBackLinkRect())) { sfxClick(); S7.setupPage = 0; APP.screen = 'title'; }
     return;
@@ -1599,15 +1616,24 @@ function s7Start() {
   S7.paused = false;
   judge.active = false;
   s7ApplyRedTactic();   // あいての作戦(おまかせならここで抽選)
-  // スーパーエース(FW)/スーパーパサー(MF)/さいきょうディフェンダー(DF)の適用
+  // スペシャル選手の適用(じぶんのチーム)
   s7Blue[4].isAce = S7.aceCount >= 1;
   s7Blue[5].isAce = S7.aceCount >= 2;
   s7Blue[2].isPasser = S7.passerCount >= 1;
   s7Blue[3].isPasser = S7.passerCount >= 2;
   s7Blue[0].isHelper = S7.helperCount >= 1;
   s7Blue[1].isHelper = S7.helperCount >= 2;
+  s7BlueGK.isSuperGK = S7.superGK;
+  // スペシャル選手の適用(あいてのチーム)
+  s7RedFW.isAce = S7.redAceCount >= 1;
+  s7RedDF[3].isAce = S7.redAceCount >= 2;      // 前列サイドFW
+  s7RedDF[4].isPasser = S7.redPasserCount >= 1; // 前列中央MF
+  s7RedDF[1].isPasser = S7.redPasserCount >= 2; // 後列中央DF
+  s7RedDF[0].isHelper = S7.redHelperCount >= 1; // 後列サイドDF
+  s7RedDF[2].isHelper = S7.redHelperCount >= 2;
+  s7RedGK.isSuperGK = S7.redSuperGK;
   // さいきょうDFは体が大きい(ボールを奪える範囲も広い)
-  for (const p of s7Blue) p.radius = p.isHelper ? 0.72 : 0.55;
+  for (const p of [...s7Blue, ...s7RedOutfield]) p.radius = p.isHelper ? 0.72 : 0.55;
   S7.giveGoP = null;
   S7.giveGoT = 0;
   s7Kickoff('blue');
@@ -1912,17 +1938,47 @@ function s7AttackAI(p, dt) {
   moveToward(p, tx, ty, speed * s7SpeedMult(p), dt);
 }
 
+// GKのゴールキック(配球): 届くはんいで いちばん前の味方へ蹴る。
+// ふつうのGKはハーフライン手前まで、スーパーGKは相手コートの中央付近まで飛ばせる
+function s7GKKick(gk, team) {
+  const maxDist = gk.isSuperGK ? 46 : 27;
+  const cap = gk.isSuperGK ? 48 : 30;
+  const mates = team === 'blue' ? s7Blue : s7RedOutfield;
+  let best = null, bestScore = -Infinity;
+  for (const q of mates) {
+    const d = Math.hypot(q.x - gk.x, q.y - gk.y);
+    if (d > maxDist) continue;
+    const forwardness = team === 'blue' ? -q.y : q.y;   // 相手ゴールに近いほど高評価
+    if (forwardness > bestScore) { bestScore = forwardness; best = q; }
+  }
+  if (!best) {
+    let bd = Infinity;
+    for (const q of mates) {
+      const d = Math.hypot(q.x - gk.x, q.y - gk.y);
+      if (d < bd) { bd = d; best = q; }
+    }
+  }
+  const lead = 0.25;
+  const tx = best.x + best.vx * lead, ty = best.y + best.vy * lead;
+  const dx = tx - ball.x, dy = ty - ball.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const speed = Math.max(PASS_SPEED, Math.min(cap, len * 1.4));
+  ball.vx = dx / len * speed;
+  ball.vy = dy / len * speed;
+  ball.owner = null;
+  ball.lastKicker = gk;
+  ball.kickCooldown = KICK_COOLDOWN;
+  ball.receiver = best;
+  sfxShoot();
+}
+
 function s7BlueGKAI(dt) {
+  const gkSpd = GK_SPEED * (s7BlueGK.isSuperGK ? 1.2 : 1);
   if (ball.owner === s7BlueGK) {
-    // キャッチしたら近くのDFへつなぐ
+    // キャッチしたらゴールキックで前へつなぐ
     s7BlueGK.holdTimer += dt;
     if (s7BlueGK.holdTimer >= s7BlueGK.holdLimit) {
-      let best = null, bd = Infinity;
-      for (const p of s7Blue) {
-        const d = Math.hypot(p.x - s7BlueGK.x, p.y - s7BlueGK.y);
-        if (d < bd) { bd = d; best = p; }
-      }
-      s7Pass(s7BlueGK, best);
+      s7GKKick(s7BlueGK, 'blue');
     }
     return;
   }
@@ -1936,24 +1992,16 @@ function s7BlueGKAI(dt) {
   const postPad = s7BlueGK.radius * 0.4;
   const gtx = Math.max(goalCx - S7F.goalW / 2 + postPad,
               Math.min(goalCx + S7F.goalW / 2 - postPad, targetX));
-  moveToward(s7BlueGK, gtx, S7F.h - 1.5, GK_SPEED, dt);
+  moveToward(s7BlueGK, gtx, S7F.h - 1.5, gkSpd, dt);
 }
 
 function s7RedGKAI(dt) {
+  const gkSpd = s7RedSpeed(GK_SPEED) * (s7RedGK.isSuperGK ? 1.2 : 1);
   if (ball.owner === s7RedGK) {
-    // キャッチしたら前方へ大きくパント
+    // キャッチしたらゴールキックで前へつなぐ
     s7RedGK.holdTimer += dt;
     if (s7RedGK.holdTimer >= s7RedGK.holdLimit) {
-      const tx = 4 + Math.random() * (S7F.w - 8);
-      const ty = S7F.h * 0.45;
-      const dx = tx - ball.x, dy = ty - ball.y;
-      const len = Math.hypot(dx, dy) || 1;
-      ball.vx = dx / len * 15;
-      ball.vy = dy / len * 15;
-      ball.owner = null;
-      ball.lastKicker = s7RedGK;
-      ball.kickCooldown = KICK_COOLDOWN;
-      sfxShoot();
+      s7GKKick(s7RedGK, 'red');
     }
     return;
   }
@@ -1967,7 +2015,7 @@ function s7RedGKAI(dt) {
   const postPad = s7RedGK.radius * 0.4;
   const gtx = Math.max(goalCx - S7F.goalW / 2 + postPad,
               Math.min(goalCx + S7F.goalW / 2 - postPad, targetX));
-  moveToward(s7RedGK, gtx, 1.5, s7RedSpeed(GK_SPEED), dt);
+  moveToward(s7RedGK, gtx, 1.5, gkSpd, dt);
 }
 
 // ---------- しあいモード: 赤のゾーンディフェンス(Phase 2) ----------
@@ -2062,7 +2110,7 @@ function s7UpdateRedDefense(dt) {
   for (const p of s7RedDF) {
     moveToward(p, p.tgtX !== undefined ? p.tgtX : p.homeX,
                   p.tgtY !== undefined ? p.tgtY : p.homeY,
-                  s7RedSpeed(DF_SPEED), dt);
+                  s7RedSpeed(DF_SPEED) * s7SpeedMult(p), dt);
   }
   s7RedFWDefend(dt);
 }
@@ -2079,7 +2127,7 @@ function s7RedFWDefend(dt) {
     tx = Math.max(6, Math.min(S7F.w - 6, ball.x * 0.5 + S7F.w * 0.25));
     ty = S7F.h * 0.52;
   }
-  moveToward(p, tx, ty, s7RedSpeed(DF_SPEED), dt);
+  moveToward(p, tx, ty, s7RedSpeed(DF_SPEED) * s7SpeedMult(p), dt);
 }
 
 // ---------- しあいモード: 赤の攻撃 / 青の帰陣・守備 ----------
@@ -2167,7 +2215,7 @@ function s7UpdateRedAttack(dt) {
         if (p.y > S7F.h - 11) {
           // ゴールが近い: シュート(遠すぎる位置からは撃たず、届く距離まで運ぶ)
           const aimX = goalCx + (Math.random() * 2 - 1) * (S7F.goalW / 2 - 0.5);
-          versusShoot(p, aimX, S7F.h);
+          versusShoot(p, aimX, S7F.h, p.isAce ? 1.25 : 1);
         } else {
           s7Pass(p, s7RedChoosePassTarget(p));
         }
@@ -2199,7 +2247,7 @@ function s7UpdateRedAttack(dt) {
       // カウンター: 奪った直後の数秒間、FWは全力で駆け上がる
       if (T.sprint && p.role === 'FW' && S7.redCounterT > 0) speed = s7RedSpeed(DF_SPEED) * 1.25;
     }
-    moveToward(p, tx, ty, speed, dt);
+    moveToward(p, tx, ty, speed * s7SpeedMult(p), dt);
   }
 }
 
@@ -2750,7 +2798,7 @@ function drawPlayer(p) {
   ctx.fill();
 
   // スーパーエース(金のリング+星) / きょうりょくディフェンダー(水色のリング)
-  if (p.isAce) {
+  if (p.isAce || p.isSuperGK) {
     ctx.strokeStyle = '#ffd700';
     ctx.lineWidth = Math.max(2, r * 0.2);
     ctx.beginPath();
@@ -2921,7 +2969,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v23)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v24)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -3726,7 +3774,7 @@ function drawS7SetupScreen() {
   ctx.textAlign = 'center';
   ctx.font = 'bold 20px sans-serif';
   ctx.fillStyle = '#ffe14d';
-  const pageTitle = S7.setupPage === 0 ? 'さくせんの せってい (1/2)' : 'まもり・ひょうじの せってい (2/2)';
+  const pageTitle = ['さくせんの せってい (1/3)', 'スペシャルせんしゅ (2/3)', 'まもり・ひょうじ (3/3)'][S7.setupPage];
   ctx.fillText(pageTitle, cx, 66);
 
   const rows = s7SetupRows();
@@ -3773,7 +3821,7 @@ function drawS7SetupScreen() {
   ctx.fillStyle = '#0a3550';
   ctx.font = 'bold 14px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(S7.setupPage === 0 ? 'つぎの せってい ▸' : '◂ まえの せってい', nbx + nbw / 2, nby + nbh / 2 + 5);
+  ctx.fillText('つぎの せってい ▸', nbx + nbw / 2, nby + nbh / 2 + 5);
 
   const [sbx, sby, sbw, sbh] = s7StartMatchButtonRect();
   const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 300);
