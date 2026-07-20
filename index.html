@@ -152,7 +152,8 @@ const MATCH = {
   message: '',
   blueScore: 0,
   redScore: 0,
-  difficulty: 1      // 1(ふつう)〜5(むずかしい): あいてチームのスピード倍率
+  difficulty: 1,     // 1(ふつう)〜5(むずかしい): あいてチームのスピード倍率
+  paused: false
 };
 
 // なんいど1(ふつう=今までどおり)〜5(むずかしい)まで、あいて(赤)のスピードだけ少しずつ上げる
@@ -374,7 +375,8 @@ const game = {
   timer: 0,        // 状態が切り替わるまでの時間
   score: 0,
   message: '',
-  sub: ''
+  sub: '',
+  paused: false
 };
 
 // アプリ全体の画面: 'title' / 'play' / 'result'
@@ -450,14 +452,18 @@ window.addEventListener('deviceorientation', e => {
   }
 });
 
-function tiltButtonRect() {
-  // 画面右下(左下のスティックと反対側)
-  return [window.innerWidth - 152, window.innerHeight - 60, 144, 42];
+// そうさ(いどう)の切り替えは、開いているせっていパネルの中にだけ表示される。
+// 今どこに表示されているかを毎回計算する(パネルが閉じていればnull)
+function activeTiltRowRect() {
+  if (!tilt.supported) return null;
+  if (MATCH.mode === 's7' && S7.paused) return s7TiltRowRect();
+  if (MATCH.mode === 'versus' && MATCH.paused) return versusTiltRowRect();
+  if (MATCH.mode === 'practice' && game.paused) return practiceTiltRowRect();
+  return null;
 }
-
-function inTiltButton(x, y) {
-  const [bx, by, bw, bh] = tiltButtonRect();
-  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+function inActiveTiltRow(x, y) {
+  const r = activeTiltRowRect();
+  return r ? inRect(x, y, r) : false;
 }
 
 // 切り替えボタンに触れている最中の指
@@ -549,15 +555,15 @@ canvas.addEventListener('touchstart', e => {
   e.preventDefault();
   ensureAudio();  // iOSはユーザー操作の中でしか音を鳴らせないため、最初のタップで解放
   for (const t of e.changedTouches) {
-    // 操作切り替えボタン: iOSのセンサー許可は touchend でしか呼べないので
-    // ここでは「ボタンに触れた」ことだけ覚えておく
-    if (tilt.supported && inTiltButton(t.clientX, t.clientY)) {
+    // そうさ(いどう)の切り替えは、iOSのセンサー許可はtouchendでしか呼べないので
+    // ここでは「ボタンに触れた」ことだけ覚えておく(せっていパネルが開いているときだけ判定)
+    if (inActiveTiltRow(t.clientX, t.clientY)) {
       buttonTouches.add(t.identifier);
       continue;
     }
-    // 判断タイム/そうさモードのボタンは、スティックの判定範囲と近くても
+    // せっていボタンは、スティックの判定範囲と近くても
     // 必ずボタンとして扱う(スティック起動より先にチェックする)
-    if (inJudgeButton(t.clientX, t.clientY) || inControlButton(t.clientX, t.clientY)) {
+    if (inSettingsButton(t.clientX, t.clientY)) {
       handleTap(t.clientX, t.clientY);
       continue;
     }
@@ -565,7 +571,7 @@ canvas.addEventListener('touchstart', e => {
     const nearStick = Math.hypot(t.clientX - hx, t.clientY - hy) < 130;
     const leftBottom = t.clientX < window.innerWidth * 0.45 &&
                        t.clientY > window.innerHeight * 0.55;
-    if (!tilt.enabled && !stick.active && (nearStick || leftBottom)) {
+    if (!tilt.enabled && !stick.active && !isAnyPaused() && (nearStick || leftBottom)) {
       stick.active = true;
       stick.touchId = t.identifier;
       stick.baseX = t.clientX;
@@ -598,7 +604,7 @@ function endTouch(e, isCancel) {
       buttonTouches.delete(t.identifier);
       // 指を離した位置がボタンの上なら切り替え(touchend はiOSの
       // ユーザー操作として認められるので、ここなら許可ダイアログが出せる)
-      if (!isCancel && inTiltButton(t.clientX, t.clientY)) toggleTilt();
+      if (!isCancel && inActiveTiltRow(t.clientX, t.clientY)) toggleTilt();
       continue;
     }
     if (stick.active && t.identifier === stick.touchId) {
@@ -614,30 +620,10 @@ canvas.addEventListener('touchcancel', e => endTouch(e, true), { passive: false 
 // PCクリック → パス
 canvas.addEventListener('mousedown', e => { ensureAudio(); handleTap(e.clientX, e.clientY); });
 
-function judgeButtonRect() {
-  // 画面右下、かたむきボタンの上に縦積み
-  return [window.innerWidth - 152, window.innerHeight - 148, 144, 36];
-}
-
-function inJudgeButton(x, y) {
-  const [bx, by, bw, bh] = judgeButtonRect();
-  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
-}
-
 function toggleJudge() {
   judge.enabled = !judge.enabled;
   if (!judge.enabled) judge.active = false;
   showToast(judge.enabled ? 'はんだんタイム ON' : 'はんだんタイム OFF (じつりょくコース)');
-}
-
-function controlButtonRect() {
-  // 判断タイムボタンのすぐ下、かたむきボタンのすぐ上
-  return [window.innerWidth - 152, window.innerHeight - 104, 144, 36];
-}
-
-function inControlButton(x, y) {
-  const [bx, by, bw, bh] = controlButtonRect();
-  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
 }
 
 function toggleControlMode() {
@@ -677,11 +663,6 @@ function s7ButtonRect() {
 function inS7Button(x, y) {
   const [bx, by, bw, bh] = s7ButtonRect();
   return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
-}
-
-function s7ExitButtonRect() {
-  // しあいモード中はそうさ切り替えボタンが不要なので、その位置を「タイトルへ」に使う
-  return controlButtonRect();
 }
 
 // ---------- しあいモード: 設定画面(Phase 3) ----------
@@ -776,37 +757,114 @@ function inRect(x, y, rect) {
   return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
 }
 
+// ---------- 共通: せっていボタン(全モード共通、画面左下) ----------
+// 判断タイム/そうさ(いどう)/そうさたいしょう/タイトルへ もどる を1つにまとめる
+function settingsButtonRect() {
+  return [10, window.innerHeight - 213, 100, 38];
+}
+function inSettingsButton(x, y) { return inRect(x, y, settingsButtonRect()); }
+
+function isAnyPaused() {
+  return (MATCH.mode === 's7' && S7.paused) ||
+         (MATCH.mode === 'versus' && MATCH.paused) ||
+         (MATCH.mode === 'practice' && game.paused);
+}
+
+// 判断タイム/そうさたいしょうの汎用トグル行(タップでON⇔OFFが切り替わる)
+const JUDGE_ROW = {
+  label: 'はんだんタイム', values: ['OFF', 'ON'],
+  get: () => judge.enabled ? 1 : 0,
+  set: () => toggleJudge()
+};
+const FOLLOWBALL_ROW = {
+  label: 'そうさたいしょう', values: ['こてい', 'ボールの人'],
+  get: () => control.followBall ? 1 : 0,
+  set: () => toggleControlMode()
+};
+
 // ---------- しあいモード: ポーズメニュー(試合中に設定変更) ----------
 S7.paused = false;
 // ポーズ中に変更できる設定(試合時間とエース/協力DFの人数は変更不可)
 const S7_PAUSE_ROWS = [
+  JUDGE_ROW,
   S7_ROWS.atk, S7_ROWS.def, S7_ROWS.redAtk,
   S7_ROWS.blueR, S7_ROWS.redR, S7_ROWS.strength,
   S7_ROWS.areas, S7_ROWS.radiusShow
 ];
 
-function s7PauseButtonRect() {
-  // 左上のスコアボックスのすぐ下
-  return [10, 184, 120, 36];
-}
-
 function s7PauseRowRect(i) {
-  const w = Math.min(window.innerWidth - 40, 330), h = 42, gap = 10;
+  const w = Math.min(window.innerWidth - 40, 330), h = 40, gap = 8;
   const totalH = (h + gap) * S7_PAUSE_ROWS.length - gap;
-  const startY = window.innerHeight * 0.44 - totalH / 2;
+  const startY = window.innerHeight * 0.40 - totalH / 2;
   return [(window.innerWidth - w) / 2, startY + i * (h + gap), w, h];
 }
 
-function s7ResumeButtonRect() {
+function s7TiltRowRect() {
   const [, by, , bh] = s7PauseRowRect(S7_PAUSE_ROWS.length - 1);
-  const w = 220, h = 54;
-  return [(window.innerWidth - w) / 2, by + bh + 24, w, h];
+  const w = Math.min(window.innerWidth - 40, 330), h = 40;
+  return [(window.innerWidth - w) / 2, by + bh + 8, w, h];
+}
+
+function s7ResumeButtonRect() {
+  const base = tilt.supported ? s7TiltRowRect() : s7PauseRowRect(S7_PAUSE_ROWS.length - 1);
+  const [, by, , bh] = base;
+  const w = 220, h = 50;
+  return [(window.innerWidth - w) / 2, by + bh + 16, w, h];
 }
 
 function s7PauseQuitLinkRect() {
   const [, by, , bh] = s7ResumeButtonRect();
-  const w = 160, h = 32;
-  return [(window.innerWidth - w) / 2, by + bh + 14, w, h];
+  const w = 160, h = 30;
+  return [(window.innerWidth - w) / 2, by + bh + 10, w, h];
+}
+
+// ---------- れんしゅうモード: せっていパネル ----------
+const PRACTICE_PAUSE_ROWS = [JUDGE_ROW, FOLLOWBALL_ROW];
+
+function practicePauseRowRect(i) {
+  const w = Math.min(window.innerWidth - 40, 320), h = 42, gap = 10;
+  const totalH = (h + gap) * PRACTICE_PAUSE_ROWS.length - gap;
+  const startY = window.innerHeight * 0.36 - totalH / 2;
+  return [(window.innerWidth - w) / 2, startY + i * (h + gap), w, h];
+}
+
+function practiceTiltRowRect() {
+  const [, by, , bh] = practicePauseRowRect(PRACTICE_PAUSE_ROWS.length - 1);
+  const w = Math.min(window.innerWidth - 40, 320), h = 42;
+  return [(window.innerWidth - w) / 2, by + bh + 10, w, h];
+}
+
+function practiceResumeButtonRect() {
+  const base = tilt.supported ? practiceTiltRowRect() : practicePauseRowRect(PRACTICE_PAUSE_ROWS.length - 1);
+  const [, by, , bh] = base;
+  const w = 200, h = 48;
+  return [(window.innerWidth - w) / 2, by + bh + 16, w, h];
+}
+
+function practiceQuitLinkRect() {
+  const [, by, , bh] = practiceResumeButtonRect();
+  const w = 160, h = 30;
+  return [(window.innerWidth - w) / 2, by + bh + 10, w, h];
+}
+
+// ---------- たいせんモード: せっていパネル ----------
+function versusTiltRowRect() {
+  const w = Math.min(window.innerWidth - 40, 320), h = 42;
+  return [(window.innerWidth - w) / 2, window.innerHeight * 0.40, w, h];
+}
+
+function versusResumeButtonRect() {
+  let by, bh;
+  if (tilt.supported) { [, by, , bh] = versusTiltRowRect(); }
+  else { by = window.innerHeight * 0.40; bh = 0; }
+  const w = 200, h = 48;
+  return [(window.innerWidth - w) / 2, by + bh + 16, w, h];
+}
+
+function versusQuitLinkRect() {
+  const [, by, , bh] = versusResumeButtonRect();
+  const w = 160, h = 30;
+  return [(window.innerWidth - w) / 2, by + bh + 10, w, h];
 }
 
 function timeButtonRect(i) {
@@ -951,13 +1009,14 @@ function handleTap(sx, sy) {
   }
 
   if (MATCH.mode === 's7') {
-    // ポーズ中: 設定変更・つづける・タイトルへ のみ受け付ける
+    // ポーズ中: せっていパネルの操作のみ受け付ける
     if (S7.paused) {
+      if (tilt.supported && inRect(sx, sy, s7TiltRowRect())) return;  // タップはtouchendで処理
       for (let i = 0; i < S7_PAUSE_ROWS.length; i++) {
         if (inRect(sx, sy, s7PauseRowRect(i))) {
           const row = S7_PAUSE_ROWS[i];
-          row.set((row.get() + 1) % row.values.length);
           sfxClick();
+          row.set((row.get() + 1) % row.values.length);
           return;
         }
       }
@@ -965,9 +1024,7 @@ function handleTap(sx, sy) {
       if (inRect(sx, sy, s7PauseQuitLinkRect())) { sfxClick(); s7ExitToTitle(); }
       return;
     }
-    if (inRect(sx, sy, s7PauseButtonRect())) { sfxClick(); S7.paused = true; return; }
-    if (inJudgeButton(sx, sy)) { sfxClick(); toggleJudge(); return; }
-    if (inControlButton(sx, sy)) { sfxClick(); s7ExitToTitle(); return; }
+    if (inSettingsButton(sx, sy)) { sfxClick(); S7.paused = true; return; }
     // 自分がパスを出せる保持者(操作中の選手、または青GKのゴールキック)
     const s7Passer = ball.owner === controlledPlayer ? controlledPlayer
                    : (ball.owner === s7BlueGK ? s7BlueGK : null);
@@ -1034,6 +1091,19 @@ function handleTap(sx, sy) {
   }
 
   if (MATCH.mode === 'versus') {
+    // ポーズ中: せっていパネルの操作のみ受け付ける
+    if (MATCH.paused) {
+      if (tilt.supported && inRect(sx, sy, versusTiltRowRect())) return; // タップはtouchendで処理
+      if (inRect(sx, sy, versusResumeButtonRect())) { sfxClick(); MATCH.paused = false; return; }
+      if (inRect(sx, sy, versusQuitLinkRect())) {
+        sfxClick();
+        MATCH.paused = false;
+        MATCH.mode = null;
+        APP.screen = 'title';
+      }
+      return;
+    }
+    if (inSettingsButton(sx, sy)) { sfxClick(); MATCH.paused = true; return; }
     if (MATCH.state !== 'play') return;
     if (MATCH.attacker !== 'blue' || ball.owner !== controlledPlayer) return;
     const [fx, fy] = toField(sx, sy);
@@ -1054,8 +1124,26 @@ function handleTap(sx, sy) {
     return;
   }
 
-  if (inJudgeButton(sx, sy)) { sfxClick(); toggleJudge(); return; }
-  if (inControlButton(sx, sy)) { sfxClick(); toggleControlMode(); return; }
+  // ポーズ中: せっていパネルの操作のみ受け付ける
+  if (game.paused) {
+    for (let i = 0; i < PRACTICE_PAUSE_ROWS.length; i++) {
+      if (inRect(sx, sy, practicePauseRowRect(i))) {
+        const row = PRACTICE_PAUSE_ROWS[i];
+        sfxClick();
+        row.set((row.get() + 1) % row.values.length);
+        return;
+      }
+    }
+    if (inRect(sx, sy, practiceResumeButtonRect())) { sfxClick(); game.paused = false; return; }
+    if (inRect(sx, sy, practiceQuitLinkRect())) {
+      sfxClick();
+      game.paused = false;
+      MATCH.mode = null;
+      APP.screen = 'title';
+    }
+    return;
+  }
+  if (inSettingsButton(sx, sy)) { sfxClick(); game.paused = true; return; }
   if (game.state !== 'play') return;
   if (ball.owner !== controlledPlayer) return;  // 自分がボールを持っている時だけ
   const [fx, fy] = toField(sx, sy);
@@ -2928,43 +3016,30 @@ function drawJudgeTimer() {
   ctx.restore();
 
   ctx.textAlign = 'center';
-  ctx.font = 'bold 20px sans-serif';
+  ctx.font = 'bold 18px sans-serif';
   ctx.lineWidth = 5;
   ctx.strokeStyle = 'rgba(0,0,0,0.7)';
   const label = 'はんだんタイム ' + Math.ceil(judge.timer);
-  ctx.strokeText(label, window.innerWidth / 2, window.innerHeight * 0.14);
+  const ly = window.innerHeight - 230;
+  ctx.strokeText(label, window.innerWidth / 2, ly);
   ctx.fillStyle = '#ffe14d';
-  ctx.fillText(label, window.innerWidth / 2, window.innerHeight * 0.14);
+  ctx.fillText(label, window.innerWidth / 2, ly);
 }
 
-function drawJudgeButton() {
-  const [bx, by, bw, bh] = judgeButtonRect();
-  ctx.fillStyle = judge.enabled ? 'rgba(255,225,77,0.92)' : 'rgba(0,0,0,0.45)';
+// 全モード共通: 画面左下の「⚙️ せってい」ボタン(判断タイム・そうさ・タイトルへ もどる をまとめる)
+function drawSettingsButton() {
+  const [bx, by, bw, bh] = settingsButtonRect();
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
   ctx.beginPath();
   ctx.roundRect(bx, by, bw, bh, 10);
   ctx.fill();
   ctx.strokeStyle = 'rgba(255,255,255,0.6)';
   ctx.lineWidth = 1.5;
   ctx.stroke();
-  ctx.fillStyle = judge.enabled ? '#553c00' : '#ffffff';
-  ctx.font = 'bold 12px sans-serif';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 13px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(judge.enabled ? 'はんだんタイム: ON' : 'はんだんタイム: OFF', bx + bw / 2, by + bh / 2 + 4);
-}
-
-function drawControlButton() {
-  const [bx, by, bw, bh] = controlButtonRect();
-  ctx.fillStyle = control.followBall ? 'rgba(255,225,77,0.92)' : 'rgba(0,0,0,0.45)';
-  ctx.beginPath();
-  ctx.roundRect(bx, by, bw, bh, 10);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.fillStyle = control.followBall ? '#553c00' : '#ffffff';
-  ctx.font = 'bold 12px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(control.followBall ? 'そうさ: ボールの人' : 'そうさ: こていせんしゅ', bx + bw / 2, by + bh / 2 + 4);
+  ctx.fillText('⚙ せってい', bx + bw / 2, by + bh / 2 + 5);
 }
 
 function drawBall() {
@@ -3009,35 +3084,19 @@ function drawStick() {
   ctx.fill();
 }
 
+// れんしゅうモード: 下中央の かんたんな モード表示(大きなタイトルバーは廃止)
 function drawHUD() {
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  const w = Math.min(window.innerWidth - 20, 560);
-  ctx.beginPath();
-  ctx.roundRect((window.innerWidth - w) / 2, 8, w, 54, 10);
-  ctx.fill();
-
-  ctx.fillStyle = '#ffffff';
+  const y = window.innerHeight - 213;
   ctx.textAlign = 'center';
-  ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v26)', window.innerWidth / 2, 30);
-  ctx.font = '13px sans-serif';
-  let hint;
-  if (!IS_TOUCH) {
-    hint = 'いどう: やじるし/WASD ・ パス: みかたをクリック ・ シュート: ゴールをクリック';
-  } else if (tilt.enabled) {
-    hint = 'いどう: かたむける ・ パス: みかたをタップ ・ シュート: ゴールをタップ';
-  } else {
-    hint = 'いどう: ひだりしたスティック ・ パス: みかたをタップ ・ シュート: ゴールをタップ';
-  }
-  ctx.fillText(hint, window.innerWidth / 2, 50);
-
-  drawTiltButton();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 13px sans-serif';
+  ctx.fillText('れんしゅう', window.innerWidth / 2, y + 24);
   drawToast();
 }
 
-function drawTiltButton() {
-  if (!tilt.supported) return;
-  const [bx, by, bw, bh] = tiltButtonRect();
+// そうさ(いどう)の切り替えボタン。位置は呼び出し側(せっていパネル)が渡す
+function drawTiltButton(rect) {
+  const [bx, by, bw, bh] = rect;
   ctx.fillStyle = tilt.enabled ? 'rgba(255,225,77,0.92)' : 'rgba(0,0,0,0.45)';
   ctx.beginPath();
   ctx.roundRect(bx, by, bw, bh, 10);
@@ -3090,30 +3149,65 @@ function drawCenterMessage() {
   }
 }
 
+// 画面右下にスコア+残り時間をまとめて表示
 function drawScore() {
+  const y = window.innerHeight - 213;
+  const w = 170, h = 38;
+  const x = window.innerWidth - w - 10;
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  ctx.beginPath();
-  ctx.roundRect(10, 70, 110, 38, 10);
-  ctx.fill();
-  ctx.fillStyle = '#ffe14d';
-  ctx.font = 'bold 16px sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText('ゴール ' + game.score, 24, 95);
-}
-
-function drawRoundTimer() {
-  const secs = Math.max(0, Math.ceil(roundTime));
-  const urgent = secs <= 10;
-  const w = 110, h = 38;
-  const x = window.innerWidth - w - 10, y = 70;
-  ctx.fillStyle = urgent ? 'rgba(180,30,30,0.6)' : 'rgba(0,0,0,0.45)';
   ctx.beginPath();
   ctx.roundRect(x, y, w, h, 10);
   ctx.fill();
+  ctx.fillStyle = '#ffe14d';
+  ctx.font = 'bold 13px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('ゴール ' + game.score, x + 10, y + 15);
+}
+
+function drawRoundTimer() {
+  const y = window.innerHeight - 213;
+  const w = 170;
+  const x = window.innerWidth - w - 10;
+  const secs = Math.max(0, Math.ceil(roundTime));
+  const urgent = secs <= 10;
   ctx.fillStyle = urgent ? '#ffdada' : '#ffffff';
-  ctx.font = 'bold 15px sans-serif';
+  ctx.font = 'bold 13px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('のこり ' + secs + 'びょう', x + 10, y + 32);
+}
+
+// れんしゅうモード: せっていパネル(判断タイム・そうさたいしょう・そうさ・タイトルへ もどる)
+function drawPracticeSettingsMenu() {
+  if (!game.paused) return;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  const cx = window.innerWidth / 2;
   ctx.textAlign = 'center';
-  ctx.fillText('のこり ' + secs + 'びょう', x + w / 2, y + 24);
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillStyle = '#ffe14d';
+  const [, firstY] = practicePauseRowRect(0);
+  ctx.fillText('せってい', cx, firstY - 28);
+
+  PRACTICE_PAUSE_ROWS.forEach((row, i) => drawS7SettingRow(row, practicePauseRowRect(i)));
+  if (tilt.supported) drawTiltButton(practiceTiltRowRect());
+
+  const [rbx, rby, rbw, rbh] = practiceResumeButtonRect();
+  ctx.fillStyle = 'rgba(150,255,170,0.92)';
+  ctx.beginPath();
+  ctx.roundRect(rbx, rby, rbw, rbh, 14);
+  ctx.fill();
+  ctx.strokeStyle = '#1d5c2a';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = '#1d5c2a';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('つづける', rbx + rbw / 2, rby + rbh / 2 + 7);
+
+  const [lbx, lby, lbw, lbh] = practiceQuitLinkRect();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('タイトルへ もどる', lbx + lbw / 2, lby + lbh / 2 + 5);
 }
 
 // 日本語は単語区切りが無いので1文字ずつ折り返す
@@ -3186,6 +3280,10 @@ function drawTitleScreen() {
   drawModeButton(practiceButtonRect(), 'れんしゅうモード', 'うごきと パスの れんしゅう', 'rgba(255,225,77,0.92)');
   drawModeButton(versusButtonRect(), 'たいせんモード', 'あいてチームと たいせん!', 'rgba(120,200,255,0.92)');
   drawModeButton(s7ButtonRect(), 'しあいモード', '8にんせい フルコート!', 'rgba(150,255,170,0.92)');
+
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.font = '10px sans-serif';
+  ctx.fillText('v27', cx, window.innerHeight - 8);
 }
 
 function drawModeButton(rect, label, sub, color) {
@@ -3341,43 +3439,36 @@ function drawLevelSelectScreen() {
   ctx.fillText('じかんの えらびなおし', lbx + lbw / 2, lby + lbh / 2 + 5);
 }
 
+// たいせんモード: 下中央の かんたんな モード表示(レベル・攻守)
 function drawVersusHUD() {
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  const w = Math.min(window.innerWidth - 20, 560);
-  ctx.beginPath();
-  ctx.roundRect((window.innerWidth - w) / 2, 8, w, 54, 10);
-  ctx.fill();
-  ctx.fillStyle = '#ffffff';
+  const y = window.innerHeight - 213;
   ctx.textAlign = 'center';
-  ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('たいせんモード (レベル' + MATCH.difficulty + ')', window.innerWidth / 2, 30);
   ctx.font = 'bold 13px sans-serif';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('たいせん(レベル' + MATCH.difficulty + ')', window.innerWidth / 2, y + 15);
+  ctx.font = 'bold 12px sans-serif';
   ctx.fillStyle = MATCH.attacker === 'blue' ? '#8fffb0' : '#ffb3b3';
-  ctx.fillText(MATCH.attacker === 'blue' ? 'こうげき ちゅう!' : 'しゅび ちゅう!', window.innerWidth / 2, 50);
+  ctx.fillText(MATCH.attacker === 'blue' ? 'こうげき ちゅう!' : 'しゅび ちゅう!', window.innerWidth / 2, y + 32);
+  drawToast();
+}
 
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  ctx.beginPath();
-  ctx.roundRect(10, 70, 150, 38, 10);
-  ctx.fill();
-  ctx.fillStyle = '#ffe14d';
-  ctx.font = 'bold 15px sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText('あなた ' + MATCH.blueScore + ' - ' + MATCH.redScore + ' あいて', 20, 94);
-
+// 画面右下にスコア+残り時間をまとめて表示
+function drawVersusScore() {
+  const y = window.innerHeight - 213;
+  const w = 170, h = 38;
+  const x = window.innerWidth - w - 10;
   const secs = Math.max(0, Math.ceil(MATCH.timeLeft));
   const urgent = secs <= 10;
-  const w2 = 110, h2 = 38, x2 = window.innerWidth - w2 - 10, y2 = 70;
   ctx.fillStyle = urgent ? 'rgba(180,30,30,0.6)' : 'rgba(0,0,0,0.45)';
   ctx.beginPath();
-  ctx.roundRect(x2, y2, w2, h2, 10);
+  ctx.roundRect(x, y, w, h, 10);
   ctx.fill();
+  ctx.fillStyle = '#ffe14d';
+  ctx.font = 'bold 13px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('あなた ' + MATCH.blueScore + ' - ' + MATCH.redScore + ' あいて', x + 10, y + 15);
   ctx.fillStyle = urgent ? '#ffdada' : '#ffffff';
-  ctx.font = 'bold 15px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('のこり ' + secs + 'びょう', x2 + w2 / 2, y2 + 24);
-
-  drawTiltButton();
-  drawToast();
+  ctx.fillText('のこり ' + secs + 'びょう', x + 10, y + 32);
 }
 
 function drawVersusTurnoverMessage() {
@@ -3392,6 +3483,38 @@ function drawVersusTurnoverMessage() {
   ctx.fillText(MATCH.message, cx, cy);
 }
 
+// たいせんモード: せっていパネル(そうさ・タイトルへ もどる)
+function drawVersusSettingsMenu() {
+  if (!MATCH.paused) return;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  const cx = window.innerWidth / 2;
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillStyle = '#ffe14d';
+  ctx.fillText('せってい', cx, window.innerHeight * 0.32);
+
+  if (tilt.supported) drawTiltButton(versusTiltRowRect());
+
+  const [rbx, rby, rbw, rbh] = versusResumeButtonRect();
+  ctx.fillStyle = 'rgba(150,255,170,0.92)';
+  ctx.beginPath();
+  ctx.roundRect(rbx, rby, rbw, rbh, 14);
+  ctx.fill();
+  ctx.strokeStyle = '#1d5c2a';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = '#1d5c2a';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('つづける', rbx + rbw / 2, rby + rbh / 2 + 7);
+
+  const [lbx, lby, lbw, lbh] = versusQuitLinkRect();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('タイトルへ もどる', lbx + lbw / 2, lby + lbh / 2 + 5);
+}
+
 function drawVersusPlay() {
   drawField();
   drawBottomGoal();
@@ -3402,7 +3525,10 @@ function drawVersusPlay() {
   if (ball.owner) drawBall();
   drawStick();
   drawVersusHUD();
+  drawVersusScore();
+  drawSettingsButton();
   drawVersusTurnoverMessage();
+  drawVersusSettingsMenu();
 }
 
 function drawVersusResultScreen() {
@@ -3613,67 +3739,36 @@ function s7DrawMinimap() {
   }
 }
 
+// しあいモード: 下中央の かんたんな モード表示(攻守のみ)
 function s7DrawHUD() {
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  const w = Math.min(window.innerWidth - 20, 560);
-  ctx.beginPath();
-  ctx.roundRect((window.innerWidth - w) / 2, 8, w, 54, 10);
-  ctx.fill();
-  ctx.fillStyle = '#ffffff';
+  const y = window.innerHeight - 213;
   ctx.textAlign = 'center';
-  ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('しあいモード (Phase 3)', window.innerWidth / 2, 30);
-  ctx.font = '13px sans-serif';
-  let hint;
-  if (!IS_TOUCH) {
-    hint = 'いどう: やじるし/WASD ・ パス: みかたをクリック ・ シュート: ゴールをクリック';
-  } else if (tilt.enabled) {
-    hint = 'いどう: かたむける ・ パス: みかたをタップ ・ シュート: ゴールをタップ';
-  } else {
-    hint = 'いどう: ひだりしたスティック ・ パス: みかたをタップ ・ シュート: ゴールをタップ';
-  }
-  ctx.fillText(hint, window.innerWidth / 2, 50);
-
-  // スコア + 攻守 + 残り時間 + 作戦(左上)
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  ctx.beginPath();
-  ctx.roundRect(10, 70, 160, 104, 10);
-  ctx.fill();
-  ctx.fillStyle = '#ffe14d';
-  ctx.font = 'bold 15px sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText('あなた ' + S7.score + ' - ' + S7.redScore + ' あいて', 22, 92);
   ctx.font = 'bold 13px sans-serif';
-  ctx.fillStyle = S7.attacker === 'blue' ? '#8fffb0' : '#ffb3b3';
-  ctx.fillText(S7.attacker === 'blue' ? 'こうげき ちゅう!' : 'しゅび ちゅう!', 22, 114);
-  const secs = Math.max(0, Math.ceil(S7.timeLeft));
-  const mins = Math.floor(secs / 60);
-  ctx.fillStyle = secs <= 10 ? '#ff8080' : '#ffffff';
-  ctx.fillText('のこり ' + mins + ':' + String(secs % 60).padStart(2, '0'), 22, 138);
-  ctx.fillStyle = '#c9e8ff';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('しあい', window.innerWidth / 2, y + 15);
   ctx.font = 'bold 12px sans-serif';
-  const tacLabel = S7.attacker === 'blue'
-    ? S7_TACTICS[S7.blueTacticIdx].label
-    : 'まもり・' + S7_DEF_TACTICS[S7.blueDefTacticIdx].label;
-  ctx.fillText('さくせん: ' + tacLabel, 22, 160);
-
-  drawTiltButton();
+  ctx.fillStyle = S7.attacker === 'blue' ? '#8fffb0' : '#ffb3b3';
+  ctx.fillText(S7.attacker === 'blue' ? 'こうげき ちゅう!' : 'しゅび ちゅう!', window.innerWidth / 2, y + 32);
   drawToast();
 }
 
-function s7DrawPauseButton() {
-  const [bx, by, bw, bh] = s7PauseButtonRect();
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+// 画面右下にスコア+残り時間をまとめて表示
+function s7DrawScore() {
+  const y = window.innerHeight - 213;
+  const w = 170, h = 38;
+  const x = window.innerWidth - w - 10;
+  const secs = Math.max(0, Math.ceil(S7.timeLeft));
+  const mins = Math.floor(secs / 60);
+  ctx.fillStyle = secs <= 10 ? 'rgba(180,30,30,0.6)' : 'rgba(0,0,0,0.45)';
   ctx.beginPath();
-  ctx.roundRect(bx, by, bw, bh, 10);
+  ctx.roundRect(x, y, w, h, 10);
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = '#ffe14d';
   ctx.font = 'bold 13px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('⏸ せってい', bx + bw / 2, by + bh / 2 + 5);
+  ctx.textAlign = 'left';
+  ctx.fillText('あなた ' + S7.score + ' - ' + S7.redScore + ' あいて', x + 10, y + 15);
+  ctx.fillStyle = secs <= 10 ? '#ff8080' : '#ffffff';
+  ctx.fillText('のこり ' + mins + ':' + String(secs % 60).padStart(2, '0'), x + 10, y + 32);
 }
 
 function s7DrawPauseMenu() {
@@ -3689,6 +3784,7 @@ function s7DrawPauseMenu() {
   ctx.fillText('ポーズ / せってい', cx, firstY - 28);
 
   S7_PAUSE_ROWS.forEach((row, i) => drawS7SettingRow(row, s7PauseRowRect(i)));
+  if (tilt.supported) drawTiltButton(s7TiltRowRect());
 
   const [rbx, rby, rbw, rbh] = s7ResumeButtonRect();
   ctx.fillStyle = 'rgba(150,255,170,0.92)';
@@ -3706,21 +3802,6 @@ function s7DrawPauseMenu() {
   ctx.fillStyle = '#ffffff';
   ctx.font = '14px sans-serif';
   ctx.fillText('タイトルへ もどる', lbx + lbw / 2, lby + lbh / 2 + 5);
-}
-
-function s7DrawExitButton() {
-  const [bx, by, bw, bh] = s7ExitButtonRect();
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  ctx.beginPath();
-  ctx.roundRect(bx, by, bw, bh, 10);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 12px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('タイトルへ もどる', bx + bw / 2, by + bh / 2 + 4);
 }
 
 function s7DrawCenterMessage() {
@@ -3955,9 +4036,8 @@ function s7Draw() {
   drawSlowMoOverlay();
   drawStick();
   s7DrawHUD();
-  s7DrawPauseButton();
-  drawJudgeButton();
-  s7DrawExitButton();
+  s7DrawScore();
+  drawSettingsButton();
   drawJudgeTimer();
   s7DrawMinimap();
   s7DrawCenterMessage();
@@ -3990,10 +4070,10 @@ function draw() {
   drawHUD();
   drawScore();
   drawRoundTimer();
-  drawJudgeButton();
-  drawControlButton();
+  drawSettingsButton();
   drawJudgeTimer();
   drawCenterMessage();
+  drawPracticeSettingsMenu();
 }
 
 // 判断タイムの終了時、開いていたコースを使わなかったらヒントを出す(頻度は控えめ)
@@ -4034,28 +4114,32 @@ function loop(now) {
       }
     }
   } else if (APP.screen === 'play' && MATCH.mode === 'versus') {
-    MATCH.timeLeft -= rawDt;
-    if (MATCH.timeLeft <= 0) {
-      MATCH.timeLeft = 0;
-      endVersusRound();
-    } else {
-      updateVersus(rawDt);
+    if (!MATCH.paused) {
+      MATCH.timeLeft -= rawDt;
+      if (MATCH.timeLeft <= 0) {
+        MATCH.timeLeft = 0;
+        endVersusRound();
+      } else {
+        updateVersus(rawDt);
+      }
     }
   } else if (APP.screen === 'play') {
-    roundTime -= rawDt;
-    if (roundTime <= 0) {
-      roundTime = 0;
-      endRound();
-    } else {
-      if (judge.active) {
-        judge.timer -= rawDt;
-        if (judge.timer <= 0) {
-          judge.timer = 0;
-          judge.active = false;
-          maybeShowOpenLaneHint();
+    if (!game.paused) {
+      roundTime -= rawDt;
+      if (roundTime <= 0) {
+        roundTime = 0;
+        endRound();
+      } else {
+        if (judge.active) {
+          judge.timer -= rawDt;
+          if (judge.timer <= 0) {
+            judge.timer = 0;
+            judge.active = false;
+            maybeShowOpenLaneHint();
+          }
         }
+        update(rawDt * (judge.active ? SLOWMO_SCALE : 1));
       }
-      update(rawDt * (judge.active ? SLOWMO_SCALE : 1));
     }
   }
 
