@@ -2337,6 +2337,19 @@ function s7RedChoosePassTarget(p) {
   return mates.reduce((a, b) => (dist(b) < dist(a) ? b : a));
 }
 
+// 詰められた時の緊急パス先: 前方または横(自分より1m以上後ろは対象外)の
+// あいている味方だけに限定する。後ろへの逃げパスは狙って奪われやすいので選ばない
+function s7RedChooseEscapeTarget(p) {
+  const dist = q => Math.hypot(q.x - p.x, q.y - p.y);
+  const mates = s7RedOutfield.filter(q => q !== p && q.y > p.y - 1);
+  const open = mates.filter(q => !s7RedLaneRisky(p, q));
+  if (open.length === 0) return null;
+  // 前にいる味方を優先。同程度ならより近い方
+  const forwardOpen = open.filter(q => q.y > p.y + 1);
+  const pool = forwardOpen.length > 0 ? forwardOpen : open;
+  return pool.reduce((a, b) => (dist(b) < dist(a) ? b : a));
+}
+
 function s7UpdateRedAttack(dt) {
   const T = S7_TACTIC_PARAMS[s7TeamTactic('red')];
   for (const p of s7RedOutfield) {
@@ -2346,16 +2359,27 @@ function s7UpdateRedAttack(dt) {
       // ドリブルで前進(深い位置ではゴールへ向かう)しつつ、時間が来たらパスかシュート
       p.holdTimer += dt;
       const goalCx = S7F.w / 2;
-      if (p.y > S7F.h * 0.6) {
+
+      // 詰めてくる相手を検出
+      let presser = null, pd = Infinity;
+      for (const b of s7Blue) {
+        const d = Math.hypot(b.x - p.x, b.y - p.y);
+        if (d < pd) { pd = d; presser = b; }
+      }
+      const pressured = pd < 2.6;
+
+      if (pressured && presser) {
+        // 詰めてくる相手から横へかわしながら少しだけ前進する(棒立ちで奪われない)
+        const awayX = p.x - presser.x;
+        const away = Math.abs(awayX) < 0.3 ? (p.x < goalCx ? -1 : 1) : Math.sign(awayX);
+        tx = Math.max(1.5, Math.min(S7F.w - 1.5, p.x + away * 3));
+        ty = p.y + 1.5;
+      } else if (p.y > S7F.h * 0.6) {
         tx = p.x + (goalCx - p.x) * 0.4; ty = p.y + 2;
       } else {
         tx = p.x; ty = p.y + 2;
       }
-      // プレッシャーを受けたら早めにボールを離す。ゴール前でも判断を速くする
-      let pressured = false;
-      for (const b of s7Blue) {
-        if (Math.hypot(b.x - p.x, b.y - p.y) < 2.6) { pressured = true; break; }
-      }
+
       let limit = p.holdLimit;
       if (p.y > S7F.h - 16) limit = Math.min(limit, 0.55);
       if (pressured) limit = Math.min(limit, 0.35);
@@ -2365,8 +2389,14 @@ function s7UpdateRedAttack(dt) {
           const aimX = goalCx + (Math.random() * 2 - 1) * (S7F.goalW / 2 - 0.5);
           versusShoot(p, aimX, S7F.h, p.isAce ? 1.25 : 1);
         } else if (pressured) {
-          // 詰められている: 無理せずパスで逃がす
-          s7Pass(p, s7RedChoosePassTarget(p));
+          // 詰められている: 前方・横のあいている味方だけに逃がす(後ろへは出さない)
+          const escape = s7RedChooseEscapeTarget(p);
+          if (escape) {
+            s7Pass(p, escape);
+          } else {
+            // 安全な逃げ場がない: パスせず、詰めてくる相手をかわし続ける
+            p.holdTimer = Math.max(0, limit - 0.2);
+          }
         } else {
           // プレッシャーがないとき: 前方に良いコース(あいている味方)があればパス、
           // なければパスせずキーパーに迫って前進を続ける(行けるときは前進を優先)
@@ -3306,7 +3336,7 @@ function drawTitleScreen() {
 
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
   ctx.font = '10px sans-serif';
-  ctx.fillText('v28', cx, window.innerHeight - 8);
+  ctx.fillText('v29', cx, window.innerHeight - 8);
 }
 
 function drawModeButton(rect, label, sub, color) {
