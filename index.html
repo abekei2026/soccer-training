@@ -243,6 +243,37 @@ const s7RedFW = (() => {
 })();
 const s7RedOutfield = [...s7RedDF, s7RedFW];
 
+// ---------- フォーメーション(試合中も設定画面から変更可) ----------
+// 青: 7人目(中央MF/追加ぶん)の役割・ポジションだけを差し替えて3パターンを作る
+const S7_BLUE_FORMATIONS = [
+  { key: 'balance', label: 'バランス(2-3-2)',
+    p6: { role: 'MF', x: 0.50, y: 0.60, minY: 0.32, maxY: 0.78, push: 12 } },
+  { key: 'attack',  label: 'こうげき(2-2-3)',
+    p6: { role: 'FW', x: 0.50, y: 0.34, minY: 0.06, maxY: 0.55, push: 6 } },
+  { key: 'defense', label: 'しゅび(3-2-2)',
+    p6: { role: 'DF', x: 0.50, y: 0.85, minY: 0.60, maxY: 0.95, push: 10 } }
+];
+function s7ApplyBlueFormation() {
+  const f = S7_BLUE_FORMATIONS[S7.blueFormationIdx].p6;
+  const p = s7Blue[6];
+  p.role = f.role;
+  p.baseX = S7F.w * f.x; p.baseY = S7F.h * f.y;
+  p.minY = S7F.h * f.minY; p.maxY = S7F.h * f.maxY;
+  p.pushDist = f.push;
+}
+
+// 赤: ゾーンの位置(homeX/homeY)は変えず、各エリアの役割だけ差し替えて
+// 攻撃時の前後距離(前がかり/バランス/守備的)を変える。ゾーン守備そのものは変わらない
+const S7_RED_FORMATIONS = [
+  { key: 'balance', label: 'バランス(3-1-3)', roles: ['DF', 'DF', 'DF', 'FW', 'MF', 'FW'] },
+  { key: 'attack',  label: 'こうげき(2-1-4)', roles: ['DF', 'DF', 'MF', 'FW', 'FW', 'FW'] },
+  { key: 'defense', label: 'しゅび(4-1-2)',   roles: ['DF', 'DF', 'DF', 'MF', 'DF', 'FW'] }
+];
+function s7ApplyRedFormation() {
+  const roles = S7_RED_FORMATIONS[S7.redFormationIdx].roles;
+  s7RedDF.forEach((p, i) => { p.role = roles[i]; });
+}
+
 // なんいど設定(Phase 3で選択画面を用意する。今は初期値のみ)
 const S7_GATHER_RADIUS_UNITS = [1, 1.5, 2];
 S7.gatherRadiusIdx = 1;   // 1.5倍
@@ -344,6 +375,8 @@ S7.redAceCount = 0;         // あいてチームのスペシャル選手
 S7.redPasserCount = 0;
 S7.redHelperCount = 0;
 S7.redSuperGK = false;
+S7.blueFormationIdx = 0;    // ぼくのフォーメーション(試合中も変更可)
+S7.redFormationIdx = 0;     // あいてのフォーメーション(試合中も変更可)
 
 function s7BlueGatherRadius() {
   return S7_AREA_W * S7_GATHER_RADIUS_UNITS[S7.blueGatherRadiusIdx]
@@ -680,7 +713,7 @@ const S7_ROWS = {
     get: () => S7.aceCount, set: i => { S7.aceCount = i; } },
   passer: { label: 'スーパーパサー(MF)', values: ['なし', '1にん', '2にん'],
     get: () => S7.passerCount, set: i => { S7.passerCount = i; } },
-  helper: { label: 'さいきょうDF', values: ['なし', '1にん', '2にん'],
+  helper: { label: 'さいきょうDF', values: ['なし', '1にん', '2にん', '3にん'],
     get: () => S7.helperCount, set: i => { S7.helperCount = i; } },
   superGK: { label: 'スーパーGK', values: ['なし', 'あり'],
     get: () => S7.superGK ? 1 : 0, set: i => { S7.superGK = i === 1; } },
@@ -688,10 +721,14 @@ const S7_ROWS = {
     get: () => S7.redAceCount, set: i => { S7.redAceCount = i; } },
   redPasser: { label: 'あいてパサー(MF)', values: ['なし', '1にん', '2にん'],
     get: () => S7.redPasserCount, set: i => { S7.redPasserCount = i; } },
-  redHelper: { label: 'あいてさいきょうDF', values: ['なし', '1にん', '2にん'],
+  redHelper: { label: 'あいてさいきょうDF', values: ['なし', '1にん', '2にん', '3にん'],
     get: () => S7.redHelperCount, set: i => { S7.redHelperCount = i; } },
   redSuperGK: { label: 'あいてスーパーGK', values: ['なし', 'あり'],
     get: () => S7.redSuperGK ? 1 : 0, set: i => { S7.redSuperGK = i === 1; } },
+  blueFormation: { label: 'ぼくの フォーメーション', values: S7_BLUE_FORMATIONS.map(f => f.label),
+    get: () => S7.blueFormationIdx, set: i => { S7.blueFormationIdx = i; s7ApplyBlueFormation(); } },
+  redFormation: { label: 'あいての フォーメーション', values: S7_RED_FORMATIONS.map(f => f.label),
+    get: () => S7.redFormationIdx, set: i => { S7.redFormationIdx = i; s7ApplyRedFormation(); } },
   blueR: { label: 'じぶんの はんけい', values: ['1', '1.5', '2'],
     get: () => S7.blueGatherRadiusIdx, set: i => { S7.blueGatherRadiusIdx = i; } },
   redR: { label: 'あいての はんけい', values: ['1', '1.5', '2'],
@@ -707,7 +744,8 @@ const S7_SETTING_PAGES = [
   [S7_ROWS.duration, S7_ROWS.atk, S7_ROWS.def, S7_ROWS.redAtk],
   [S7_ROWS.ace, S7_ROWS.passer, S7_ROWS.helper, S7_ROWS.superGK,
    S7_ROWS.redAce, S7_ROWS.redPasser, S7_ROWS.redHelper, S7_ROWS.redSuperGK],
-  [S7_ROWS.blueR, S7_ROWS.redR, S7_ROWS.strength, S7_ROWS.areas, S7_ROWS.radiusShow]
+  [S7_ROWS.blueR, S7_ROWS.redR, S7_ROWS.strength, S7_ROWS.areas, S7_ROWS.radiusShow],
+  [S7_ROWS.blueFormation, S7_ROWS.redFormation]
 ];
 S7.setupPage = 0;
 S7.descMode = 'atk';   // 説明パネルに出すのは こうげき/まもり のどちらの作戦か
@@ -784,10 +822,11 @@ const FOLLOWBALL_ROW = {
 
 // ---------- しあいモード: ポーズメニュー(試合中に設定変更) ----------
 S7.paused = false;
-// ポーズ中に変更できる設定(試合時間とエース/協力DFの人数は変更不可)
+// ポーズ中に変更できる設定(試合時間とエース/協力DFの人数は変更不可。フォーメーションは変更可)
 const S7_PAUSE_ROWS = [
   JUDGE_ROW,
   S7_ROWS.atk, S7_ROWS.def, S7_ROWS.redAtk,
+  S7_ROWS.blueFormation, S7_ROWS.redFormation,
   S7_ROWS.blueR, S7_ROWS.redR, S7_ROWS.strength,
   S7_ROWS.areas, S7_ROWS.radiusShow
 ];
@@ -1720,6 +1759,8 @@ function s7Start() {
   S7.paused = false;
   judge.active = false;
   s7ApplyRedTactic();   // あいての作戦(おまかせならここで抽選)
+  s7ApplyBlueFormation();
+  s7ApplyRedFormation();
   // スペシャル選手の適用(じぶんのチーム)
   s7Blue[4].isAce = S7.aceCount >= 1;
   s7Blue[5].isAce = S7.aceCount >= 2;
@@ -1727,6 +1768,7 @@ function s7Start() {
   s7Blue[3].isPasser = S7.passerCount >= 2;
   s7Blue[0].isHelper = S7.helperCount >= 1;
   s7Blue[1].isHelper = S7.helperCount >= 2;
+  s7Blue[6].isHelper = S7.helperCount >= 3;    // 中央MF(8人制で追加)
   s7BlueGK.isSuperGK = S7.superGK;
   // スペシャル選手の適用(あいてのチーム)
   s7RedFW.isAce = S7.redAceCount >= 1;
@@ -1735,6 +1777,7 @@ function s7Start() {
   s7RedDF[1].isPasser = S7.redPasserCount >= 2; // 後列中央DF
   s7RedDF[0].isHelper = S7.redHelperCount >= 1; // 後列サイドDF
   s7RedDF[2].isHelper = S7.redHelperCount >= 2;
+  s7RedDF[5].isHelper = S7.redHelperCount >= 3; // 前列サイドFW
   s7RedGK.isSuperGK = S7.redSuperGK;
   // さいきょうDFは体が大きい(ボールを奪える範囲も広い)
   for (const p of [...s7Blue, ...s7RedOutfield]) p.radius = p.isHelper ? 0.72 : 0.55;
@@ -3373,7 +3416,7 @@ function drawTitleScreen() {
 
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
   ctx.font = '10px sans-serif';
-  ctx.fillText('v30', cx, window.innerHeight - 8);
+  ctx.fillText('v31', cx, window.innerHeight - 8);
 }
 
 function drawModeButton(rect, label, sub, color) {
@@ -3997,7 +4040,7 @@ function drawS7SetupScreen() {
   ctx.textAlign = 'center';
   ctx.font = 'bold 20px sans-serif';
   ctx.fillStyle = '#ffe14d';
-  const pageTitle = ['さくせんの せってい (1/3)', 'スペシャルせんしゅ (2/3)', 'まもり・ひょうじ (3/3)'][S7.setupPage];
+  const pageTitle = ['さくせんの せってい (1/4)', 'スペシャルせんしゅ (2/4)', 'まもり・ひょうじ (3/4)', 'フォーメーション (4/4)'][S7.setupPage];
   ctx.fillText(pageTitle, cx, 66);
 
   const rows = s7SetupRows();
