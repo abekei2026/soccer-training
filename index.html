@@ -2088,6 +2088,25 @@ function s7AttackerInMyArea(p) {
 // ゾーンディフェンス: ボールに行くのはプレス役1人+カバー役1人だけ。
 // 残りは自分のエリアを守り、エリア内の攻撃選手をマークする(団子にならない)
 // 目標位置の計算は「判断の更新間隔」(敵の強さ設定)ごとにしか行わない=反応速度
+// GKがキャッチしているあいだ、相手チームの選手はキーパーから距離(9m)を取る
+// (シュートまでの詰めは通常どおり。キャッチ後だけ下がる)
+function s7KeepAwayFromGK(p, tx, ty) {
+  const KEEP = 9;
+  let gk = null;
+  if (ball.owner === s7BlueGK && p.team === 'red') gk = s7BlueGK;
+  else if (ball.owner === s7RedGK && p.team === 'blue') gk = s7RedGK;
+  if (!gk) return [tx, ty];
+  const dx = tx - gk.x, dy = ty - gk.y;
+  const d = Math.hypot(dx, dy);
+  if (d >= KEEP) return [tx, ty];
+  if (d < 0.01) return [gk.x, gk.y + (gk === s7BlueGK ? -KEEP : KEEP)];
+  let nx = gk.x + dx / d * KEEP;
+  let ny = gk.y + dy / d * KEEP;
+  nx = Math.max(1.5, Math.min(S7F.w - 1.5, nx));
+  ny = Math.max(1.5, Math.min(S7F.h - 1.5, ny));
+  return [nx, ny];
+}
+
 function s7ComputeRedDefenseTargets() {
   const radius = s7GatherRadius();
   // ボールに反応するのはホームエリアがボールに近いDFだけ
@@ -2123,6 +2142,7 @@ function s7ComputeRedDefenseTargets() {
       if (m) [tx, ty] = s7GoalSideOf(m);
       else [tx, ty] = s7DefHomeSlide(p);
     }
+    [tx, ty] = s7KeepAwayFromGK(p, tx, ty);   // 青GKキャッチ中は距離を取る
     p.tgtX = tx; p.tgtY = ty;
     p.isActiveDF = active.includes(p);   // 集結半径の可視化用
   }
@@ -2154,6 +2174,7 @@ function s7RedFWDefend(dt) {
     tx = Math.max(6, Math.min(S7F.w - 6, ball.x * 0.5 + S7F.w * 0.25));
     ty = S7F.h * 0.52;
   }
+  [tx, ty] = s7KeepAwayFromGK(p, tx, ty);   // 青GKキャッチ中は距離を取る
   moveToward(p, tx, ty, s7RedSpeed(DF_SPEED) * s7SpeedMult(p), dt);
 }
 
@@ -2334,6 +2355,7 @@ function s7UpdateBlueDefense(dt) {
       ty = by + (ball.y - by) * 0.1;
       sprint = Math.hypot(tx - p.x, ty - p.y) > 6;
     }
+    [tx, ty] = s7KeepAwayFromGK(p, tx, ty);   // 赤GKキャッチ中は距離を取る
     moveToward(p, tx, ty, (sprint ? AI_SPEED * 1.25 : AI_SPEED) * s7SpeedMult(p), dt);
   }
 }
@@ -2997,7 +3019,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v25)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v26)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
