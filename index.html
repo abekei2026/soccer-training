@@ -2272,12 +2272,24 @@ function s7RedFWDefend(dt) {
 // 攻撃が深まるほどゴール幅へ絞り込んでペナルティエリアに押し寄せる
 function s7RedAttackSpot(p) {
   let [tx, ty] = s7AttackSpot(p, 'red');
-  // 攻撃の深さに応じたゴール幅への絞り込み(赤のペナルティエリア圧を維持)
+  // 攻撃の深さに応じたゴール幅へ絞り込み(赤のペナルティエリア圧を維持)
   const goalCx = S7F.w / 2;
   const deep = Math.max(0, Math.min(1, (ball.y - S7F.h * 0.5) / (S7F.h * 0.3)));
   const squeeze = p.role === 'DF' ? 0.3 : 0.45;
   tx = tx + (goalCx - tx) * deep * squeeze;
   tx = Math.max(1.5, Math.min(S7F.w - 1.5, tx));
+
+  // ボール保持者からのパスコースが塞がっていたら、開くように左右へずれる
+  const owner = ball.owner;
+  if (owner && owner.team === 'red' && owner !== p) {
+    if (s7RedLaneRisky(owner, { x: tx, y: ty })) {
+      const shifts = [4, -4, 7, -7, 3, -3];
+      for (const dx of shifts) {
+        const candX = Math.max(1.5, Math.min(S7F.w - 1.5, tx + dx));
+        if (!s7RedLaneRisky(owner, { x: candX, y: ty })) { tx = candX; break; }
+      }
+    }
+  }
   return [tx, ty];
 }
 
@@ -2352,8 +2364,19 @@ function s7UpdateRedAttack(dt) {
           // ゴールが近い: シュート(遠すぎる位置からは撃たず、届く距離まで運ぶ)
           const aimX = goalCx + (Math.random() * 2 - 1) * (S7F.goalW / 2 - 0.5);
           versusShoot(p, aimX, S7F.h, p.isAce ? 1.25 : 1);
-        } else {
+        } else if (pressured) {
+          // 詰められている: 無理せずパスで逃がす
           s7Pass(p, s7RedChoosePassTarget(p));
+        } else {
+          // プレッシャーがないとき: 前方に良いコース(あいている味方)があればパス、
+          // なければパスせずキーパーに迫って前進を続ける(行けるときは前進を優先)
+          const target = s7RedChoosePassTarget(p);
+          const goodForward = target && target.y > p.y + 2 && !s7RedLaneRisky(p, target);
+          if (goodForward) {
+            s7Pass(p, target);
+          } else {
+            p.holdTimer = 0;   // 前進を続ける
+          }
         }
       }
     } else if (ball.receiver === p && !ball.owner) {
@@ -3283,7 +3306,7 @@ function drawTitleScreen() {
 
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
   ctx.font = '10px sans-serif';
-  ctx.fillText('v27', cx, window.innerHeight - 8);
+  ctx.fillText('v28', cx, window.innerHeight - 8);
 }
 
 function drawModeButton(rect, label, sub, color) {
