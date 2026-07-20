@@ -1738,6 +1738,9 @@ function s7Start() {
   s7RedGK.isSuperGK = S7.redSuperGK;
   // さいきょうDFは体が大きい(ボールを奪える範囲も広い)
   for (const p of [...s7Blue, ...s7RedOutfield]) p.radius = p.isHelper ? 0.72 : 0.55;
+  // スーパーGKは体が二回り大きい(見た目もキャッチ範囲も広い)
+  s7BlueGK.radius = s7BlueGK.isSuperGK ? 0.95 : 0.55;
+  s7RedGK.radius = s7RedGK.isSuperGK ? 0.95 : 0.55;
   S7.giveGoP = null;
   S7.giveGoT = 0;
   s7Kickoff('blue');
@@ -2230,6 +2233,24 @@ function s7ComputeRedDefenseTargets() {
       if (m) [tx, ty] = s7GoalSideOf(m);
       else [tx, ty] = s7DefHomeSlide(p);
     }
+
+    // さいきょうDF: あいてがハーフラインを超えたら積極的にボールへ寄せ、
+    // ペナルティエリアに入ったら急速に詰める(通常のゾーン割り当てより優先)
+    if (p.isHelper) {
+      if (ball.y < 7) {
+        tx = ball.x; ty = ball.y;
+        p.pressBoost = 1.5;
+      } else if (ball.y < S7F.h / 2) {
+        tx = tx + (ball.x - tx) * 0.6;
+        ty = ty + (ball.y - ty) * 0.6;
+        p.pressBoost = 1.2;
+      } else {
+        p.pressBoost = 1;
+      }
+    } else {
+      p.pressBoost = 1;
+    }
+
     [tx, ty] = s7KeepAwayFromGK(p, tx, ty);   // 青GKキャッチ中は距離を取る
     p.tgtX = tx; p.tgtY = ty;
     p.isActiveDF = active.includes(p);   // 集結半径の可視化用
@@ -2245,7 +2266,7 @@ function s7UpdateRedDefense(dt) {
   for (const p of s7RedDF) {
     moveToward(p, p.tgtX !== undefined ? p.tgtX : p.homeX,
                   p.tgtY !== undefined ? p.tgtY : p.homeY,
-                  s7RedSpeed(DF_SPEED) * s7SpeedMult(p), dt);
+                  s7RedSpeed(DF_SPEED) * s7SpeedMult(p) * (p.pressBoost || 1), dt);
   }
   s7RedFWDefend(dt);
 }
@@ -2496,8 +2517,23 @@ function s7UpdateBlueDefense(dt) {
       ty = by + (ball.y - by) * 0.1;
       sprint = Math.hypot(tx - p.x, ty - p.y) > 6;
     }
+
+    // さいきょうDF: あいてがハーフラインを超えたら積極的にボールへ寄せ、
+    // ペナルティエリアに入ったら急速に詰める(通常のライン復帰より優先)
+    let pressBoost = 1;
+    if (p.isHelper) {
+      if (ball.y > S7F.h - 7) {
+        tx = ball.x; ty = ball.y;
+        pressBoost = 1.5;
+      } else if (ball.y > S7F.h / 2) {
+        tx = tx + (ball.x - tx) * 0.6;
+        ty = ty + (ball.y - ty) * 0.6;
+        pressBoost = 1.2;
+      }
+    }
+
     [tx, ty] = s7KeepAwayFromGK(p, tx, ty);   // 赤GKキャッチ中は距離を取る
-    moveToward(p, tx, ty, (sprint ? AI_SPEED * 1.25 : AI_SPEED) * s7SpeedMult(p), dt);
+    moveToward(p, tx, ty, (sprint ? AI_SPEED * 1.25 : AI_SPEED) * s7SpeedMult(p) * pressBoost, dt);
   }
 }
 
@@ -2603,11 +2639,12 @@ function s7Update(dt) {
     if (ball.x < ball.radius)         { ball.x = ball.radius;         ball.vx *= -0.6; }
     if (ball.x > S7F.w - ball.radius) { ball.x = S7F.w - ball.radius; ball.vx *= -0.6; }
 
-    // ボールを拾う判定(さいきょうディフェンダーはパスカットできる範囲も広い)
+    // ボールを拾う判定(さいきょうディフェンダー・スーパーGKは範囲が広い)
     for (const p of s7All) {
       if (p === ball.lastKicker && ball.kickCooldown > 0) continue;
       const d = Math.hypot(ball.x - p.x, ball.y - p.y);
-      if (d < CAPTURE_DIST * (p.isHelper ? 1.35 : 1)) { s7GiveBall(p); break; }
+      const mult = p.isHelper ? 1.35 : (p.isSuperGK ? 1.3 : 1);
+      if (d < CAPTURE_DIST * mult) { s7GiveBall(p); break; }
     }
   }
 
@@ -3336,7 +3373,7 @@ function drawTitleScreen() {
 
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
   ctx.font = '10px sans-serif';
-  ctx.fillText('v29', cx, window.innerHeight - 8);
+  ctx.fillText('v30', cx, window.innerHeight - 8);
 }
 
 function drawModeButton(rect, label, sub, color) {
