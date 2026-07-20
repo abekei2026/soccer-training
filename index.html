@@ -968,22 +968,27 @@ function handleTap(sx, sy) {
     if (inRect(sx, sy, s7PauseButtonRect())) { sfxClick(); S7.paused = true; return; }
     if (inJudgeButton(sx, sy)) { sfxClick(); toggleJudge(); return; }
     if (inControlButton(sx, sy)) { sfxClick(); s7ExitToTitle(); return; }
-    // ミニマップタップ → とおくの みかたへのロングパス(逆サイド展開)
+    // 自分がパスを出せる保持者(操作中の選手、または青GKのゴールキック)
+    const s7Passer = ball.owner === controlledPlayer ? controlledPlayer
+                   : (ball.owner === s7BlueGK ? s7BlueGK : null);
+
+    // ミニマップタップ → とおくの みかたへのロングパス(逆サイド展開・GKのロングフィード)
     {
       const [mx, my, mw, mh] = s7MinimapRect();
       if (sx >= mx && sx <= mx + mw && sy >= my && sy <= my + mh) {
-        if (S7.state === 'play' && ball.owner === controlledPlayer) {
+        if (S7.state === 'play' && s7Passer) {
           const fx = (sx - mx) / mw * S7F.w;
           const fy = (sy - my) / mh * S7F.h;
           let best = null, bestD = 8;   // ミニマップは小さいので広めに拾う
           for (const p of s7Blue) {
-            if (p === controlledPlayer) continue;
+            if (p === s7Passer) continue;
             const d = Math.hypot(p.x - fx, p.y - fy);
             if (d < bestD) { bestD = d; best = p; }
           }
           if (best) {
-            const passDist = Math.hypot(best.x - controlledPlayer.x, best.y - controlledPlayer.y);
-            s7Pass(controlledPlayer, best);
+            const passDist = Math.hypot(best.x - s7Passer.x, best.y - s7Passer.y);
+            if (s7Passer === s7BlueGK) s7GKKickTo(s7BlueGK, best);
+            else s7Pass(s7Passer, best);
             judge.active = false;
             if (passDist > 18) showToast('おおきな サイドチェンジ!');
           }
@@ -992,6 +997,17 @@ function handleTap(sx, sy) {
       }
     }
     if (S7.state !== 'play') return;
+    // 青GKがキャッチ中: タップした味方へゴールキック(プレイヤーがパス先を選ぶ)
+    if (ball.owner === s7BlueGK) {
+      const [gfx, gfy] = toField(sx, sy);
+      let gkBest = null, gkBestD = TAP_RADIUS + 1;   // 少し広めに拾う
+      for (const p of s7Blue) {
+        const d = Math.hypot(p.x - gfx, p.y - gfy);
+        if (d < gkBestD) { gkBestD = d; gkBest = p; }
+      }
+      if (gkBest) s7GKKickTo(s7BlueGK, gkBest);
+      return;
+    }
     if (ball.owner !== controlledPlayer) return;
     const [fx, fy] = toField(sx, sy);
     const s7GoalCx = S7F.w / 2;
@@ -1751,6 +1767,12 @@ function s7GiveBall(p) {
   } else {
     sfxPass();
   }
+
+  // 青GKがキャッチしたら、プレイヤーがパス先を選べる(5秒たつとAIが自動で蹴る)
+  if (p === s7BlueGK) {
+    p.holdLimit = 5.0;
+    showToast('キーパーキャッチ! みかたをタップして パスを だそう');
+  }
 }
 
 function s7Goal() {
@@ -1938,11 +1960,27 @@ function s7AttackAI(p, dt) {
   moveToward(p, tx, ty, speed * s7SpeedMult(p), dt);
 }
 
-// GKのゴールキック(配球): 届くはんいで いちばん前の味方へ蹴る。
+// GKのゴールキック: 指定した味方へ蹴る(飛距離の上限あり。遠すぎると途中で失速する)
 // ふつうのGKはハーフライン手前まで、スーパーGKは相手コートの中央付近まで飛ばせる
+function s7GKKickTo(gk, to) {
+  const cap = gk.isSuperGK ? 48 : 30;
+  const lead = 0.25;
+  const tx = to.x + to.vx * lead, ty = to.y + to.vy * lead;
+  const dx = tx - ball.x, dy = ty - ball.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const speed = Math.max(PASS_SPEED, Math.min(cap, len * 1.4));
+  ball.vx = dx / len * speed;
+  ball.vy = dy / len * speed;
+  ball.owner = null;
+  ball.lastKicker = gk;
+  ball.kickCooldown = KICK_COOLDOWN;
+  ball.receiver = to;
+  sfxShoot();
+}
+
+// AIのゴールキック(配球): 届くはんいで いちばん前の味方へ蹴る
 function s7GKKick(gk, team) {
   const maxDist = gk.isSuperGK ? 46 : 27;
-  const cap = gk.isSuperGK ? 48 : 30;
   const mates = team === 'blue' ? s7Blue : s7RedOutfield;
   let best = null, bestScore = -Infinity;
   for (const q of mates) {
@@ -1958,18 +1996,7 @@ function s7GKKick(gk, team) {
       if (d < bd) { bd = d; best = q; }
     }
   }
-  const lead = 0.25;
-  const tx = best.x + best.vx * lead, ty = best.y + best.vy * lead;
-  const dx = tx - ball.x, dy = ty - ball.y;
-  const len = Math.hypot(dx, dy) || 1;
-  const speed = Math.max(PASS_SPEED, Math.min(cap, len * 1.4));
-  ball.vx = dx / len * speed;
-  ball.vy = dy / len * speed;
-  ball.owner = null;
-  ball.lastKicker = gk;
-  ball.kickCooldown = KICK_COOLDOWN;
-  ball.receiver = best;
-  sfxShoot();
+  s7GKKickTo(gk, best);
 }
 
 function s7BlueGKAI(dt) {
@@ -2765,8 +2792,9 @@ function drawPlayer(p) {
     ctx.stroke();
   }
 
-  // 自分がボール保持中 → 味方に「パスできるよ」の点滅リング
-  if (ball.owner === controlledPlayer && p !== controlledPlayer && p.team === 'blue' && !p.isGK) {
+  // 自分がボール保持中(青GKのキャッチ中も) → 味方に「パスできるよ」の点滅リング
+  if ((ball.owner === controlledPlayer || (MATCH.mode === 's7' && ball.owner === s7BlueGK)) &&
+      p !== ball.owner && p.team === 'blue' && !p.isGK) {
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
     ctx.strokeStyle = `rgba(255,255,255,${0.35 + 0.45 * pulse})`;
     ctx.lineWidth = 2.5;
@@ -2969,7 +2997,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v24)', window.innerWidth / 2, 30);
+  ctx.fillText('サッカーあたまトレーニング (Phase 4 / v25)', window.innerWidth / 2, 30);
   ctx.font = '13px sans-serif';
   let hint;
   if (!IS_TOUCH) {
@@ -3460,12 +3488,14 @@ function s7DrawField() {
 }
 
 function s7DrawPassLanes() {
-  if (ball.owner !== controlledPlayer) return;
-  const [ux, uy] = toScreen(controlledPlayer.x, controlledPlayer.y);
+  const from = ball.owner === controlledPlayer ? controlledPlayer
+             : (ball.owner === s7BlueGK ? s7BlueGK : null);
+  if (!from) return;
+  const [ux, uy] = toScreen(from.x, from.y);
   const alpha = judge.active ? 0.95 : 0.5;
   for (const p of s7Blue) {
-    if (p === controlledPlayer) continue;
-    const risky = s7LaneRisky(controlledPlayer, p);
+    if (p === from) continue;
+    const risky = s7LaneRisky(from, p);
     const [sx, sy] = toScreen(p.x, p.y);
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -3499,7 +3529,7 @@ function s7DrawMinimap() {
   ctx.roundRect(mx - 3, my - 3, mw + 6, mh + 6, 6);
   ctx.fill();
   // 自分がボール保持中はタップでパスできる合図として黄色いふちにする
-  const canMapPass = ball.owner === controlledPlayer && S7.state === 'play';
+  const canMapPass = (ball.owner === controlledPlayer || ball.owner === s7BlueGK) && S7.state === 'play';
   ctx.strokeStyle = canMapPass ? 'rgba(255,225,77,0.95)' : 'rgba(255,255,255,0.7)';
   ctx.lineWidth = canMapPass ? 2.2 : 1.2;
   ctx.strokeRect(mx, my, mw, mh);
