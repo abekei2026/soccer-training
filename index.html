@@ -439,13 +439,25 @@ const ONLINE = {
 };
 const ONLINE_ID_PREFIX = 'soccer-atama-';
 
-// P2P接続のためのICEサーバー。STUNだけでは厳しいNAT(学校/モバイル回線など)を越えられないので、
-// 無料のTURN(中継)サーバー(Open Relay Project)も足して接続の成功率を上げる。
+// P2P接続のためのICEサーバー。STUNだけでは厳しいNAT(学校/モバイル回線など)を越えられず、
+// 中継(TURN)が必要になる。無料の共有TURN(openrelay等)は資格情報が失効しがちなので、
+// 確実につなぎたい場合は自分の無料TURNキーを ONLINE_TURN_EXTRA に貼る(下記手順)。
+//
+// 【自分のTURNキーの取り方(無料・約2分)】
+//  1. https://dashboard.metered.ca/ で無料アカウントを作る(無料枠 月50GB)
+//  2. TURN Credentials のページに出る iceServers 一式をコピー
+//  3. 下の ONLINE_TURN_EXTRA に貼る。例:
+//     { urls: 'turn:xxxx.relay.metered.ca:80',  username: 'yyyy', credential: 'zzzz' },
+//     { urls: 'turn:xxxx.relay.metered.ca:443?transport=tcp', username: 'yyyy', credential: 'zzzz' }
+const ONLINE_TURN_EXTRA = [
+  // ← ここに自分のTURNキーを貼ると、どんな回線でも確実につながるようになる
+];
 const ONLINE_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun.relay.metered.ca:80' },
-  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  ...ONLINE_TURN_EXTRA,
+  // 無料の共有TURN(いま資格情報が失効しており中継はほぼ効かない。念のため残置。無害)
   { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
 ];
@@ -510,6 +522,19 @@ function onlineHandleDisconnect() {
   }
 }
 
+// PeerJSのエラー種別を、子どもにも分かる原因つきメッセージに変換する
+function onlinePeerErrorMsg(err, who) {
+  const t = err && err.type;
+  if (t === 'peer-unavailable') return 'その コードの へやが みつからないよ。コードを かくにんしてね';
+  if (t === 'unavailable-id')   return 'この へやコードは いま つかえないみたい。もういちど つくってね';
+  if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed')
+    return 'サーバーに つながらないよ。Wi-Fi/でんぱを かくにんしてね';
+  if (t === 'browser-incompatible') return 'この ブラウザは オンラインに たいおうしてないみたい';
+  if (t === 'webrtc' || t === 'disconnected')
+    return 'つながりを つくれなかったよ。でんぱの よい ところで もういちど';
+  return who === 'host' ? 'へやを つくれませんでした' : 'せつぞく できませんでした。もういちど ためしてね';
+}
+
 // へやを つくる(ホスト): 4桁コードでPeerを作り、あいてからの接続を待つ
 function onlineHost() {
   onlineReset();
@@ -521,9 +546,11 @@ function onlineHost() {
   ONLINE.peer = peer;
   peer.on('open', () => { ONLINE.status = 'waiting'; });
   peer.on('connection', conn => { onlineSetupConn(conn); });
-  peer.on('error', () => {
+  peer.on('error', (err) => {
+    // すでにゲストとつながっている最中の一時エラーは、致命的でなければ無視して続行
+    if (ONLINE.status === 'connected') return;
     ONLINE.status = 'error';
-    ONLINE.errorMsg = 'へやを つくれませんでした';
+    ONLINE.errorMsg = onlinePeerErrorMsg(err, 'host');
   });
 }
 
@@ -539,9 +566,10 @@ function onlineJoin(code) {
     const conn = peer.connect(ONLINE_ID_PREFIX + code, { reliable: true });
     onlineSetupConn(conn);
   });
-  peer.on('error', () => {
+  peer.on('error', (err) => {
+    if (ONLINE.status === 'connected') return;
     ONLINE.status = 'error';
-    ONLINE.errorMsg = 'せつぞく できませんでした(コードを かくにんしてね)';
+    ONLINE.errorMsg = onlinePeerErrorMsg(err, 'guest');
   });
 }
 
@@ -4020,7 +4048,7 @@ function drawTitleScreen() {
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
   ctx.font = '10px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText('v34', cx, window.innerHeight - 8);
+  ctx.fillText('v35', cx, window.innerHeight - 8);
 }
 
 // ---------- オンラインたいせんモード: 画面びょうが(Phase 1) ----------
