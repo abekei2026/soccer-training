@@ -132,6 +132,8 @@ const control = { followBall: false };
 let controlledPlayer = userPlayer;
 // オンラインたいせん(Phase 3)でゲストが操作する赤選手(ボールを持つと自動で切り替わる。controlledPlayerの赤版)
 let controlledDefender = null;
+// オンラインしあいモード(8on8)でゲストが操作する赤選手(ボールを持つと切り替わる。s7の赤版controlledPlayer)
+let controlledRed = null;
 
 const defenders = [
   makeDefender(10, FIELD.w * 0.3, 11, false),  // 敵DF(あか)
@@ -430,7 +432,8 @@ const ONLINE = {
   inputCode: '',   // ゲストが入力中のコード(最大4桁)
   status: 'idle',  // 'idle' / 'connecting' / 'waiting' / 'connected' / 'error'
   errorMsg: '',
-  guestInput: { dx: 0, dy: 0 }  // ホスト側: ゲストから届いた最新のスティック入力
+  guestInput: { dx: 0, dy: 0 },  // ホスト側: ゲストから届いた最新のスティック入力
+  myControlled: null             // ゲスト側: 自分が操作している選手(むらさきの強調表示用)
 };
 const ONLINE_ID_PREFIX = 'soccer-atama-';
 
@@ -448,6 +451,7 @@ function onlineReset() {
   ONLINE.status = 'idle';
   ONLINE.errorMsg = '';
   ONLINE.guestInput = { dx: 0, dy: 0 };
+  ONLINE.myControlled = null;
 }
 
 const ONLINE_SCREENS = ['onlineMenu', 'onlineHost', 'onlineJoinEntry', 'onlineJoinConnecting'];
@@ -508,18 +512,23 @@ ONLINE.sendTimer = 0;
 function onlineHandleData(data) {
   if (!data) return;
   if (data.t === 'st') onlineApplyVersusState(data);
+  else if (data.t === 's7st') onlineApplyS7State(data);
   else if (data.t === 'in') { ONLINE.guestInput.dx = data.dx; ONLINE.guestInput.dy = data.dy; }
-  else if (data.t === 'tap') onlineHandleGuestTap(data.fx, data.fy);
+  else if (data.t === 'tap') {
+    if (MATCH.mode === 's7') onlineHandleGuestS7Tap(data.fx, data.fy, data.map);
+    else onlineHandleGuestTap(data.fx, data.fy);
+  }
 }
 
 // ホスト側: ゲストから届いた最新のスティック入力を、操作中の赤選手に反映する(controlledPlayerの青の入力処理と同じ式)
-function onlineApplyGuestInput(p) {
+function onlineApplyGuestInput(p, spd) {
+  spd = spd || PLAYER_SPEED;
   const gi = ONLINE.guestInput;
   const ilen = Math.hypot(gi.dx, gi.dy);
   if (ilen > 0.01) {
     const n = Math.min(1, ilen);
-    p.vx = gi.dx / ilen * PLAYER_SPEED * n;
-    p.vy = gi.dy / ilen * PLAYER_SPEED * n;
+    p.vx = gi.dx / ilen * spd * n;
+    p.vy = gi.dy / ilen * spd * n;
     p.fx = gi.dx / ilen; p.fy = gi.dy / ilen;
   } else {
     p.vx = 0; p.vy = 0;
@@ -617,6 +626,82 @@ function onlineBroadcastVersusState(dt) {
       state: MATCH.state, timeLeft: MATCH.timeLeft, message: MATCH.message
     }
   });
+}
+
+// ---------- オンラインしあいモード(8on8): ホスト権威型。ホストが全16人を進行、ゲストは赤のボール保持者を操作 ----------
+// ホスト側: ゲストのタップ(フィールド座標)を、赤のシュート/パスとして処理する(青のs7タップ処理の赤版)
+function onlineHandleGuestS7Tap(fx, fy, viaMap) {
+  if (MATCH.mode !== 's7' || S7.state !== 'play' || S7.paused) return;
+  if (!controlledRed || ball.owner !== controlledRed) return;
+  const goalCx = S7F.w / 2;
+  // 赤が攻めるのは下のゴール(y=S7F.h)。ゴール付近をタップ → シュート
+  if (fy > S7F.h - 4.0 && Math.abs(fx - goalCx) < S7F.goalW / 2 + 2) {
+    const aimX = Math.max(goalCx - S7F.goalW / 2 + 0.4,
+                 Math.min(goalCx + S7F.goalW / 2 - 0.4, fx));
+    versusShoot(controlledRed, aimX, S7F.h, controlledRed.isAce ? 1.25 : 1);
+    return;
+  }
+  // 味方(赤フィールドプレーヤー)へパス。ミニマップ経由は座標が粗いので広めに拾う
+  let best = null, bestD = viaMap ? 8 : TAP_RADIUS;
+  for (const d of s7RedOutfield) {
+    if (d === controlledRed) continue;
+    const dist = Math.hypot(d.x - fx, d.y - fy);
+    if (dist < bestD) { bestD = dist; best = d; }
+  }
+  if (best) {
+    const passDist = Math.hypot(best.x - controlledRed.x, best.y - controlledRed.y);
+    s7Pass(controlledRed, best);
+    if (viaMap && passDist > 18) showToast('おおきな サイドチェンジ!');
+  }
+}
+
+// ホスト側: しあいモードの全状態を20Hzでゲストへ送る(全16人+ボール+スコア+タイマー)
+function onlineBroadcastS7State(dt) {
+  if (!(ONLINE.role === 'host' && ONLINE.conn && ONLINE.status === 'connected')) return;
+  ONLINE.sendTimer -= dt;
+  if (ONLINE.sendTimer > 0) return;
+  ONLINE.sendTimer = 1 / 20;
+  ONLINE.conn.send({
+    t: 's7st',
+    appScreen: APP.screen,
+    ball: { x: ball.x, y: ball.y },
+    all: s7All.map(p => ({ x: p.x, y: p.y, fx: p.fx, fy: p.fy })),
+    ctrl: controlledRed ? s7All.indexOf(controlledRed) : -1,
+    owner: ball.owner ? s7All.indexOf(ball.owner) : -1,
+    s7: {
+      score: S7.score, redScore: S7.redScore, attacker: S7.attacker,
+      state: S7.state, timeLeft: S7.timeLeft, message: S7.message
+    }
+  });
+}
+
+// ゲスト側: ホストから届いたしあいモードの状態を全選手・ボール・スコアへ反映(自分ではシミュレーションしない)
+function onlineApplyS7State(data) {
+  const enteringPlay = (ONLINE.role === 'guest' && MATCH.mode !== 's7' && data.appScreen === 'play');
+  if (data.ball) { ball.x = data.ball.x; ball.y = data.ball.y; }
+  if (data.all) {
+    data.all.forEach((d, i) => {
+      const p = s7All[i];
+      if (p) { p.x = d.x; p.y = d.y; p.fx = d.fx; p.fy = d.fy; }
+    });
+  }
+  // ボール保持者を復元(黄色いリングの描画用)。ゲストはボール保持を判定しないので受信値で上書きする
+  ball.owner = (typeof data.owner === 'number' && data.owner >= 0) ? (s7All[data.owner] || null) : null;
+  ONLINE.myControlled = (typeof data.ctrl === 'number' && data.ctrl >= 0) ? (s7All[data.ctrl] || null) : null;
+  if (data.s7) {
+    S7.score = data.s7.score;
+    S7.redScore = data.s7.redScore;
+    S7.attacker = data.s7.attacker;
+    S7.state = data.s7.state;
+    S7.timeLeft = data.s7.timeLeft;
+    S7.message = data.s7.message;
+  }
+  if (ONLINE.role === 'guest' && (data.appScreen === 'play' || data.appScreen === 'result')) {
+    MATCH.mode = 's7';
+    S7.paused = false;
+    APP.screen = data.appScreen;
+  }
+  if (enteringPlay) { S7.cam.x = ball.x; S7.cam.y = ball.y; }
 }
 
 // プレー統計(ラウンド終了時のアドバイスに使う)
@@ -1265,7 +1350,7 @@ function handleTap(sx, sy) {
   }
   if (APP.screen === 'onlineHost') {
     if (ONLINE.status === 'connected' && inRect(sx, sy, onlineStartMatchButtonRect())) {
-      sfxClick(); APP.screen = 'timeSelect'; return;
+      sfxClick(); S7.setupPage = 0; APP.screen = 's7Setup'; return;
     }
     if (inRect(sx, sy, onlineBackLinkRect())) { sfxClick(); onlineReset(); APP.screen = 'title'; }
     return;
@@ -1307,7 +1392,7 @@ function handleTap(sx, sy) {
     }
     if (inRect(sx, sy, s7SetupNavRect())) { sfxClick(); S7.setupPage = (S7.setupPage + 1) % S7_SETTING_PAGES.length; return; }
     if (inRect(sx, sy, s7StartMatchButtonRect())) { sfxClick(); s7Start(); return; }
-    if (inRect(sx, sy, s7SetupBackLinkRect())) { sfxClick(); S7.setupPage = 0; APP.screen = 'title'; }
+    if (inRect(sx, sy, s7SetupBackLinkRect())) { sfxClick(); S7.setupPage = 0; APP.screen = ONLINE.role === 'host' ? 'onlineHost' : 'title'; }
     return;
   }
   if (APP.screen === 'timeSelect') {
@@ -1340,6 +1425,19 @@ function handleTap(sx, sy) {
   }
 
   if (MATCH.mode === 's7') {
+    if (ONLINE.role === 'guest') {
+      // ゲストはポーズ/せっていに触れない。タップはフィールド座標に変換してホストへ送るだけ
+      if (S7.state !== 'play' || !ONLINE.conn) return;
+      const [mx, my, mw, mh] = s7MinimapRect();
+      if (sx >= mx && sx <= mx + mw && sy >= my && sy <= my + mh) {
+        // ミニマップタップ → 逆サイドへのロングパス指示(座標はミニマップ基準で換算)
+        ONLINE.conn.send({ t: 'tap', fx: (sx - mx) / mw * S7F.w, fy: (sy - my) / mh * S7F.h, map: true });
+        return;
+      }
+      const [gfx, gfy] = toField(sx, sy);
+      ONLINE.conn.send({ t: 'tap', fx: gfx, fy: gfy });
+      return;
+    }
     // ポーズ中: せっていパネルの操作のみ受け付ける
     if (S7.paused) {
       if (tilt.supported && inRect(sx, sy, s7TiltRowRect())) return;  // タップはtouchendで処理
@@ -1929,6 +2027,8 @@ function startVersusRound(duration, difficulty) {
 function endVersusRound() {
   APP.screen = 'result';
   sfxWhistle();
+  // オンライン: 結果画面への遷移を確実にゲストへ届ける(通常のブロードキャストは間引かれるため強制送信)
+  ONLINE.sendTimer = 0; onlineBroadcastVersusState(0);
 }
 
 function updateVersus(dt) {
@@ -2100,6 +2200,8 @@ function s7EndMatch() {
   APP.screen = 'result';
   judge.active = false;
   sfxWhistle();
+  // オンライン: 結果画面への遷移を確実にゲストへ届ける(通常のブロードキャストは間引かれるため強制送信)
+  ONLINE.sendTimer = 0; onlineBroadcastS7State(0);
 }
 
 function s7ExitToTitle() {
@@ -2131,10 +2233,12 @@ function s7Kickoff(startTeam) {
     kicker.holdTimer = 0;
     kicker.holdLimit = 0.9 + Math.random() * 0.6;
     controlledPlayer = s7Blue[2];
+    controlledRed = kicker;   // オンライン: ゲストは赤のキックオフ選手を操作
   } else {
     kicker = s7Blue[2];
     kicker.x = S7F.w / 2; kicker.y = S7F.h / 2 + 1;
     controlledPlayer = kicker;
+    controlledRed = s7RedFW;   // オンライン: 青の攻撃中もゲストは赤の前線FWを操作できる
   }
   S7.attacker = startTeam;
   ball.owner = kicker;
@@ -2190,6 +2294,8 @@ function s7GiveBall(p) {
     controlledPlayer = p;
     if (judge.enabled) { judge.active = true; judge.timer = JUDGE_TIME; }
   } else {
+    // 赤のフィールドプレーヤーがボールを持ったら、オンラインのゲスト操作対象をその選手に切り替える
+    if (p.team === 'red' && !p.isGK) controlledRed = p;
     p.holdTimer = 0;
     p.holdLimit = 0.9 + Math.random() * 0.6;
   }
@@ -2936,6 +3042,11 @@ function s7Update(dt) {
   if (S7.attacker === 'red') s7UpdateRedAttack(dt);
   else s7UpdateRedDefense(dt);
 
+  // オンライン: ホストは赤の操作対象選手だけAIの代わりにゲストの入力で動かす(残りの赤選手はAIのまま)
+  if (ONLINE.role === 'host' && ONLINE.conn && ONLINE.status === 'connected' && controlledRed) {
+    onlineApplyGuestInput(controlledRed, PLAYER_SPEED * s7SpeedMult(controlledRed));
+  }
+
   // 移動 + コート内クランプ
   for (const p of s7All) {
     p.x += p.vx * dt; p.y += p.vy * dt;
@@ -3353,7 +3464,7 @@ function drawPlayer(p) {
 
   // からだ(むらさき=じぶん / あお=みかた / あか=てき / オレンジ=キーパー)
   let bodyFill, bodyStroke;
-  if (p === controlledPlayer) { bodyFill = '#a44dff'; bodyStroke = '#6a1fc4'; }
+  if (p === controlledPlayer || p === ONLINE.myControlled) { bodyFill = '#a44dff'; bodyStroke = '#6a1fc4'; }
   else if (p.isGK)           { bodyFill = '#ff9f1a'; bodyStroke = '#b86a00'; }
   else if (p.team === 'red') { bodyFill = '#ff4d4d'; bodyStroke = '#b31f1f'; }
   else                       { bodyFill = '#2f7bff'; bodyStroke = '#1a4fb0'; }
@@ -4276,6 +4387,7 @@ function s7DrawField() {
 }
 
 function s7DrawPassLanes() {
+  if (ONLINE.role === 'guest') return;   // ゲスト(赤)には青のパスコースは出さない
   const from = ball.owner === controlledPlayer ? controlledPlayer
              : (ball.owner === s7BlueGK ? s7BlueGK : null);
   if (!from) return;
@@ -4316,8 +4428,11 @@ function s7DrawMinimap() {
   ctx.beginPath();
   ctx.roundRect(mx - 3, my - 3, mw + 6, mh + 6, 6);
   ctx.fill();
+  // 操作している選手(ホスト=青のcontrolledPlayer / ゲスト=赤のmyControlled)
+  const me = ONLINE.role === 'guest' ? ONLINE.myControlled : controlledPlayer;
   // 自分がボール保持中はタップでパスできる合図として黄色いふちにする
-  const canMapPass = (ball.owner === controlledPlayer || ball.owner === s7BlueGK) && S7.state === 'play';
+  const canMapPass = (ball.owner === me ||
+                      (ONLINE.role !== 'guest' && ball.owner === s7BlueGK)) && S7.state === 'play';
   ctx.strokeStyle = canMapPass ? 'rgba(255,225,77,0.95)' : 'rgba(255,255,255,0.7)';
   ctx.lineWidth = canMapPass ? 2.2 : 1.2;
   ctx.strokeRect(mx, my, mw, mh);
@@ -4346,15 +4461,15 @@ function s7DrawMinimap() {
     ctx.fill();
   };
   for (const p of s7Blue) {
-    if (p === controlledPlayer) continue;
+    if (p === me) continue;
     dot(p, '#4d94ff', 2.4);
   }
   dot(s7BlueGK, '#ffb340', 2.4);
-  for (const p of s7RedOutfield) dot(p, '#ff5c5c', 2.2);
+  for (const p of s7RedOutfield) { if (p === me) continue; dot(p, '#ff5c5c', 2.2); }
   dot(s7RedGK, '#ffb340', 2.4);
   // 操作中の選手(目立つ色+白ふち)
-  {
-    const p = controlledPlayer;
+  if (me) {
+    const p = me;
     const dx = mx + p.x / S7F.w * mw;
     const dy = my + p.y / S7F.h * mh;
     ctx.fillStyle = '#c470ff';
@@ -4406,7 +4521,10 @@ function s7DrawScore() {
   ctx.fillStyle = '#ffe14d';
   ctx.font = 'bold 13px sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillText('あなた ' + S7.score + ' - ' + S7.redScore + ' あいて', x + 10, y + 15);
+  // ゲストは赤チームなので「あなた/あいて」を入れ替えて表示する
+  const myScore = ONLINE.role === 'guest' ? S7.redScore : S7.score;
+  const opScore = ONLINE.role === 'guest' ? S7.score : S7.redScore;
+  ctx.fillText('あなた ' + myScore + ' - ' + opScore + ' あいて', x + 10, y + 15);
   ctx.fillStyle = secs <= 10 ? '#ff8080' : '#ffffff';
   ctx.fillText('のこり ' + mins + ':' + String(secs % 60).padStart(2, '0'), x + 10, y + 32);
 }
@@ -4623,9 +4741,13 @@ function drawS7ResultScreen() {
   const cx = window.innerWidth / 2;
   ctx.textAlign = 'center';
 
+  // ゲストは赤チームなので勝敗・スコアを赤視点で表示する
+  const myScore = ONLINE.role === 'guest' ? S7.redScore : S7.score;
+  const opScore = ONLINE.role === 'guest' ? S7.score : S7.redScore;
+
   let title, titleColor;
-  if (S7.score > S7.redScore) { title = 'かち!'; titleColor = '#ffe14d'; }
-  else if (S7.score < S7.redScore) { title = 'まけ…'; titleColor = '#ffffff'; }
+  if (myScore > opScore) { title = 'かち!'; titleColor = '#ffe14d'; }
+  else if (myScore < opScore) { title = 'まけ…'; titleColor = '#ffffff'; }
   else { title = 'ひきわけ'; titleColor = '#ffffff'; }
 
   ctx.font = 'bold 32px sans-serif';
@@ -4637,7 +4759,7 @@ function drawS7ResultScreen() {
 
   ctx.font = 'bold 20px sans-serif';
   ctx.fillStyle = '#ffffff';
-  ctx.fillText('あなた ' + S7.score + ' - ' + S7.redScore + ' あいて', cx, window.innerHeight * 0.26);
+  ctx.fillText('あなた ' + myScore + ' - ' + opScore + ' あいて', cx, window.innerHeight * 0.26);
 
   ctx.font = '14px sans-serif';
   ctx.fillStyle = '#cccccc';
@@ -4646,16 +4768,22 @@ function drawS7ResultScreen() {
                ' / ' + S7_STRENGTH[S7.strengthIdx].label, cx, window.innerHeight * 0.32);
 
   const [rbx, rby, rbw, rbh] = replayButtonRect();
-  ctx.fillStyle = 'rgba(255,225,77,0.92)';
-  ctx.beginPath();
-  ctx.roundRect(rbx, rby, rbw, rbh, 14);
-  ctx.fill();
-  ctx.strokeStyle = '#553c00';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  ctx.fillStyle = '#553c00';
-  ctx.font = 'bold 20px sans-serif';
-  ctx.fillText('もういちど あそぶ', rbx + rbw / 2, rby + rbh / 2 + 7);
+  if (ONLINE.role === 'guest') {
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('あいてが つぎの しあいを きめるよ', rbx + rbw / 2, rby + rbh / 2 + 7);
+  } else {
+    ctx.fillStyle = 'rgba(255,225,77,0.92)';
+    ctx.beginPath();
+    ctx.roundRect(rbx, rby, rbw, rbh, 14);
+    ctx.fill();
+    ctx.strokeStyle = '#553c00';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#553c00';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('もういちど あそぶ', rbx + rbw / 2, rby + rbh / 2 + 7);
+  }
 
   const [tbx, tby, tbw, tbh] = titleLinkRect();
   ctx.fillStyle = '#ffffff';
@@ -4741,7 +4869,11 @@ function loop(now) {
   rawDt = Math.min(rawDt, 0.05);  // タブ復帰時などの大ジャンプを防ぐ
 
   if (APP.screen === 'play' && MATCH.mode === 's7') {
-    if (!S7.paused) {
+    if (ONLINE.role === 'guest') {
+      // ゲストは自分でシミュレーションしない。入力をホストへ送り、受信状態を描画し、カメラだけボールに追従させる
+      onlineSendGuestInput(rawDt);
+      s7UpdateCam(rawDt);
+    } else if (!S7.paused) {
       S7.timeLeft -= rawDt;
       if (S7.timeLeft <= 0) {
         S7.timeLeft = 0;
@@ -4756,6 +4888,7 @@ function loop(now) {
         }
         s7Update(rawDt * (judge.active ? SLOWMO_SCALE : 1));
       }
+      onlineBroadcastS7State(rawDt);
     }
   } else if (APP.screen === 'play' && MATCH.mode === 'versus') {
     if (ONLINE.role === 'guest') {
