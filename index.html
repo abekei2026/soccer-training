@@ -2825,10 +2825,13 @@ function s7RedChooseEscapeTarget(p) {
 
 function s7UpdateRedAttack(dt) {
   const T = S7_TACTIC_PARAMS[s7TeamTactic('red')];
+  // オンライン: ゲストが操作する赤選手はAIにパス/シュートを判断させない(ゲストのタップだけで蹴る)
+  const onlineHost = ONLINE.role === 'host' && ONLINE.conn && ONLINE.status === 'connected';
   for (const p of s7RedOutfield) {
     let tx, ty;
     let speed = s7RedSpeed(DF_SPEED);
     if (ball.owner === p) {
+      const guestHolder = onlineHost && p === controlledRed;   // ゲストが操作中の保持者はAIの蹴る判断を止める
       // ドリブルで前進(深い位置ではゴールへ向かう)しつつ、時間が来たらパスかシュート
       p.holdTimer += dt;
       const goalCx = S7F.w / 2;
@@ -2856,7 +2859,7 @@ function s7UpdateRedAttack(dt) {
       let limit = p.holdLimit;
       if (p.y > S7F.h - 16) limit = Math.min(limit, 0.55);
       if (pressured) limit = Math.min(limit, 0.35);
-      if (p.holdTimer >= limit) {
+      if (!guestHolder && p.holdTimer >= limit) {
         if (p.y > S7F.h - 11) {
           // ゴールが近い: シュート(遠すぎる位置からは撃たず、届く距離まで運ぶ)
           const aimX = goalCx + (Math.random() * 2 - 1) * (S7F.goalW / 2 - 0.5);
