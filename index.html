@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>サッカーあたまトレーニング</title>
+<!-- オンラインたいせんモード用: WebRTC接続をシンプルに扱うためのライブラリ(peerjs.comの無料シグナリングサーバーを利用) -->
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body {
@@ -416,6 +418,85 @@ const game = {
 const APP = { screen: 'title' };
 let roundTime = ROUND_DURATION;
 
+// ---------- オンラインたいせんモード(Phase 1: せつぞくの仕組みだけ) ----------
+// role: null / 'host' / 'guest'。ホストが部屋を作りコードを発行、ゲストがそのコードで直接つながる
+const ONLINE = {
+  role: null,
+  peer: null,
+  conn: null,
+  code: '',        // ホストの4桁のへやコード
+  inputCode: '',   // ゲストが入力中のコード(最大4桁)
+  status: 'idle',  // 'idle' / 'connecting' / 'waiting' / 'connected' / 'error'
+  errorMsg: ''
+};
+const ONLINE_ID_PREFIX = 'soccer-atama-';
+
+function onlineRandomCode() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+function onlineReset() {
+  if (ONLINE.peer && !ONLINE.peer.destroyed) ONLINE.peer.destroy();
+  ONLINE.role = null;
+  ONLINE.peer = null;
+  ONLINE.conn = null;
+  ONLINE.code = '';
+  ONLINE.inputCode = '';
+  ONLINE.status = 'idle';
+  ONLINE.errorMsg = '';
+}
+
+const ONLINE_SCREENS = ['onlineMenu', 'onlineHost', 'onlineJoinEntry', 'onlineJoinConnecting'];
+
+function onlineSetupConn(conn) {
+  ONLINE.conn = conn;
+  conn.on('open', () => { ONLINE.status = 'connected'; });
+  conn.on('close', () => {
+    const wasOnlineScreen = ONLINE_SCREENS.includes(APP.screen);
+    onlineReset();
+    if (wasOnlineScreen) APP.screen = 'title';
+  });
+  conn.on('error', () => {
+    ONLINE.status = 'error';
+    ONLINE.errorMsg = 'せつぞくが きれました';
+  });
+}
+
+// へやを つくる(ホスト): 4桁コードでPeerを作り、あいてからの接続を待つ
+function onlineHost() {
+  onlineReset();
+  ONLINE.role = 'host';
+  ONLINE.status = 'connecting';
+  ONLINE.code = onlineRandomCode();
+  APP.screen = 'onlineHost';
+  const peer = new Peer(ONLINE_ID_PREFIX + ONLINE.code);
+  ONLINE.peer = peer;
+  peer.on('open', () => { ONLINE.status = 'waiting'; });
+  peer.on('connection', conn => { onlineSetupConn(conn); });
+  peer.on('error', () => {
+    ONLINE.status = 'error';
+    ONLINE.errorMsg = 'へやを つくれませんでした';
+  });
+}
+
+// へやに はいる(ゲスト): 入力されたコードあてに直接つなぎに行く
+function onlineJoin(code) {
+  onlineReset();
+  ONLINE.role = 'guest';
+  ONLINE.status = 'connecting';
+  APP.screen = 'onlineJoinConnecting';
+  const peer = new Peer();
+  ONLINE.peer = peer;
+  peer.on('open', () => {
+    const conn = peer.connect(ONLINE_ID_PREFIX + code);
+    onlineSetupConn(conn);
+  });
+  peer.on('error', () => {
+    ONLINE.status = 'error';
+    ONLINE.errorMsg = 'せつぞく できませんでした(コードを かくにんしてね)';
+  });
+}
+
 // プレー統計(ラウンド終了時のアドバイスに使う)
 const stats = {
   shots: 0, saved: 0, missed: 0,
@@ -696,6 +777,47 @@ function s7ButtonRect() {
 function inS7Button(x, y) {
   const [bx, by, bw, bh] = s7ButtonRect();
   return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+
+function onlineButtonRect() {
+  const w = 240, h = 54;
+  return [(window.innerWidth - w) / 2, window.innerHeight * 0.52 + 198, w, h];
+}
+
+// ---------- オンラインたいせんモード: 画面レイアウト(Phase 1) ----------
+function onlineMenuButtonRect(i) {
+  const w = 240, h = 60, gap = 18;
+  const totalH = h * 2 + gap;
+  const startY = (window.innerHeight - totalH) / 2;
+  return [(window.innerWidth - w) / 2, startY + i * (h + gap), w, h];
+}
+function onlineBackLinkRect() {
+  const w = 180, h = 34;
+  return [(window.innerWidth - w) / 2, window.innerHeight - 70, w, h];
+}
+// 4桁コード入力用のテンキー(電話のような配置: 1〜9 → 空/0/けす)
+function onlineKeypadGeom() {
+  const w = 74, h = 58, gapX = 12, gapY = 10;
+  const cols = 3;
+  const totalW = w * cols + gapX * (cols - 1);
+  const startX = (window.innerWidth - totalW) / 2;
+  const startY = window.innerHeight * 0.36;
+  return { w, h, gapX, gapY, startX, startY };
+}
+function onlineKeypadRect(digit) {
+  const { w, h, gapX, gapY, startX, startY } = onlineKeypadGeom();
+  const row = digit === 0 ? 3 : Math.floor((digit - 1) / 3);
+  const col = digit === 0 ? 1 : (digit - 1) % 3;
+  return [startX + col * (w + gapX), startY + row * (h + gapY), w, h];
+}
+function onlineKeypadDeleteRect() {
+  const { w, h, gapX, gapY, startX, startY } = onlineKeypadGeom();
+  return [startX + 2 * (w + gapX), startY + 3 * (h + gapY), w, h];
+}
+function onlineJoinConfirmRect() {
+  const { h, startY, gapY } = onlineKeypadGeom();
+  const w = 240;
+  return [(window.innerWidth - w) / 2, startY + 4 * (h + gapY) + 16, w, 54];
 }
 
 // ---------- しあいモード: 設定画面(Phase 3) ----------
@@ -1006,6 +1128,42 @@ function handleTap(sx, sy) {
     if (inPracticeButton(sx, sy)) { sfxClick(); startRound(); }
     else if (inVersusButton(sx, sy)) { sfxClick(); APP.screen = 'timeSelect'; }
     else if (inS7Button(sx, sy)) { sfxClick(); S7.setupPage = 0; APP.screen = 's7Setup'; }
+    else if (inRect(sx, sy, onlineButtonRect())) { sfxClick(); APP.screen = 'onlineMenu'; }
+    return;
+  }
+  if (APP.screen === 'onlineMenu') {
+    if (inRect(sx, sy, onlineMenuButtonRect(0))) { sfxClick(); onlineHost(); }
+    else if (inRect(sx, sy, onlineMenuButtonRect(1))) { sfxClick(); ONLINE.inputCode = ''; APP.screen = 'onlineJoinEntry'; }
+    else if (inRect(sx, sy, onlineBackLinkRect())) { sfxClick(); onlineReset(); APP.screen = 'title'; }
+    return;
+  }
+  if (APP.screen === 'onlineHost') {
+    if (inRect(sx, sy, onlineBackLinkRect())) { sfxClick(); onlineReset(); APP.screen = 'title'; }
+    return;
+  }
+  if (APP.screen === 'onlineJoinEntry') {
+    for (let i = 0; i < 10; i++) {
+      if (inRect(sx, sy, onlineKeypadRect(i)) && ONLINE.inputCode.length < 4) {
+        sfxClick();
+        ONLINE.inputCode += String(i);
+        return;
+      }
+    }
+    if (inRect(sx, sy, onlineKeypadDeleteRect())) {
+      sfxClick();
+      ONLINE.inputCode = ONLINE.inputCode.slice(0, -1);
+      return;
+    }
+    if (inRect(sx, sy, onlineJoinConfirmRect()) && ONLINE.inputCode.length === 4) {
+      sfxClick();
+      onlineJoin(ONLINE.inputCode);
+      return;
+    }
+    if (inRect(sx, sy, onlineBackLinkRect())) { sfxClick(); onlineReset(); APP.screen = 'onlineMenu'; }
+    return;
+  }
+  if (APP.screen === 'onlineJoinConnecting') {
+    if (inRect(sx, sy, onlineBackLinkRect())) { sfxClick(); onlineReset(); APP.screen = 'onlineMenu'; }
     return;
   }
   if (APP.screen === 's7Setup') {
@@ -3413,10 +3571,195 @@ function drawTitleScreen() {
   drawModeButton(practiceButtonRect(), 'れんしゅうモード', 'うごきと パスの れんしゅう', 'rgba(255,225,77,0.92)');
   drawModeButton(versusButtonRect(), 'たいせんモード', 'あいてチームと たいせん!', 'rgba(120,200,255,0.92)');
   drawModeButton(s7ButtonRect(), 'しあいモード', '8にんせい フルコート!', 'rgba(150,255,170,0.92)');
+  drawModeButton(onlineButtonRect(), '👥 オンラインで あそぶ', 'ともだちと つながって たいせん', 'rgba(255,170,220,0.92)');
 
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
   ctx.font = '10px sans-serif';
-  ctx.fillText('v31', cx, window.innerHeight - 8);
+  ctx.fillText('v32', cx, window.innerHeight - 8);
+}
+
+// ---------- オンラインたいせんモード: 画面びょうが(Phase 1) ----------
+function drawOnlineBackLink(label) {
+  const [lbx, lby, lbw, lbh] = onlineBackLinkRect();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(label || 'もどる', lbx + lbw / 2, lby + lbh / 2 + 5);
+}
+
+function drawOnlineMenuScreen() {
+  drawField();
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  const cx = window.innerWidth / 2;
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillStyle = '#ffe14d';
+  const [, firstBy] = onlineMenuButtonRect(0);
+  ctx.fillText('オンラインで あそぶ', cx, firstBy - 40);
+
+  const labels = [['へやを つくる', 'コードを ともだちに おしえよう'], ['へやに はいる', 'おしえてもらった コードを にゅうりょく']];
+  labels.forEach((pair, i) => {
+    const [bx, by, bw, bh] = onlineMenuButtonRect(i);
+    ctx.fillStyle = 'rgba(255,170,220,0.92)';
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 14);
+    ctx.fill();
+    ctx.strokeStyle = '#553c00';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#553c00';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText(pair[0], bx + bw / 2, by + bh / 2 - 2);
+    ctx.font = '11px sans-serif';
+    ctx.fillText(pair[1], bx + bw / 2, by + bh / 2 + 18);
+  });
+
+  drawOnlineBackLink('タイトルへ もどる');
+}
+
+function drawOnlineHostScreen() {
+  drawField();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  const cx = window.innerWidth / 2;
+  ctx.textAlign = 'center';
+
+  if (ONLINE.status === 'connected') {
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillStyle = '#8fffb0';
+    ctx.fillText('せつぞく できました!', cx, window.innerHeight * 0.42);
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('つぎは いっしょに しあいが できるようになるよ', cx, window.innerHeight * 0.42 + 30);
+  } else if (ONLINE.status === 'error') {
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillStyle = '#ffb3b3';
+    ctx.fillText(ONLINE.errorMsg || 'エラーが おきました', cx, window.innerHeight * 0.42);
+  } else {
+    ctx.font = '15px sans-serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('この コードを ともだちに おしえてね', cx, window.innerHeight * 0.30);
+
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 300);
+    ctx.font = 'bold 64px sans-serif';
+    ctx.fillStyle = `rgba(255,225,77,${0.85 + 0.15 * pulse})`;
+    const codeText = ONLINE.code ? ONLINE.code.split('').join(' ') : '----';
+    ctx.fillText(codeText, cx, window.innerHeight * 0.42);
+
+    ctx.font = '15px sans-serif';
+    ctx.fillStyle = '#ffffff';
+    const msg = ONLINE.status === 'waiting' ? 'あいてが はいってくるのを まってるよ…' : 'じゅんびちゅう…';
+    ctx.fillText(msg, cx, window.innerHeight * 0.42 + 60);
+  }
+
+  drawOnlineBackLink('やめて タイトルへ');
+}
+
+function drawOnlineJoinEntryScreen() {
+  drawField();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  const cx = window.innerWidth / 2;
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillStyle = '#ffe14d';
+  ctx.fillText('4けたの コードを にゅうりょく', cx, window.innerHeight * 0.20);
+
+  // 入力中のコード表示(4マス)
+  const boxW = 50, boxH = 60, gap = 12;
+  const totalW = boxW * 4 + gap * 3;
+  const boxStartX = cx - totalW / 2;
+  const boxY = window.innerHeight * 0.25;
+  for (let i = 0; i < 4; i++) {
+    const bx = boxStartX + i * (boxW + gap);
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.beginPath();
+    ctx.roundRect(bx, boxY, boxW, boxH, 8);
+    ctx.fill();
+    ctx.strokeStyle = '#ffe14d';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    const ch = ONLINE.inputCode[i];
+    if (ch !== undefined) {
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 28px sans-serif';
+      ctx.fillText(ch, bx + boxW / 2, boxY + boxH / 2 + 10);
+    }
+  }
+
+  // テンキー
+  for (let d = 1; d <= 9; d++) {
+    const [bx, by, bw, bh] = onlineKeypadRect(d);
+    drawOnlineKey(bx, by, bw, bh, String(d));
+  }
+  const [zx, zy, zw, zh] = onlineKeypadRect(0);
+  drawOnlineKey(zx, zy, zw, zh, '0');
+  const [dx, dy, dw, dh] = onlineKeypadDeleteRect();
+  drawOnlineKey(dx, dy, dw, dh, 'けす', 'rgba(255,150,150,0.85)');
+
+  // せつぞくボタン(4桁そろったら有効)
+  const ready = ONLINE.inputCode.length === 4;
+  const [cbx, cby, cbw, cbh] = onlineJoinConfirmRect();
+  ctx.globalAlpha = ready ? 1 : 0.4;
+  ctx.fillStyle = 'rgba(150,255,170,0.9)';
+  ctx.beginPath();
+  ctx.roundRect(cbx, cby, cbw, cbh, 14);
+  ctx.fill();
+  ctx.strokeStyle = '#1d5c2a';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = '#1d5c2a';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('せつぞく', cbx + cbw / 2, cby + cbh / 2 + 7);
+  ctx.globalAlpha = 1;
+
+  drawOnlineBackLink('もどる');
+}
+
+function drawOnlineKey(bx, by, bw, bh, label, color) {
+  ctx.fillStyle = color || 'rgba(255,255,255,0.85)';
+  ctx.beginPath();
+  ctx.roundRect(bx, by, bw, bh, 10);
+  ctx.fill();
+  ctx.strokeStyle = '#553c00';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#553c00';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText(label, bx + bw / 2, by + bh / 2 + 7);
+}
+
+function drawOnlineJoinConnectingScreen() {
+  drawField();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  const cx = window.innerWidth / 2;
+  ctx.textAlign = 'center';
+
+  if (ONLINE.status === 'connected') {
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillStyle = '#8fffb0';
+    ctx.fillText('せつぞく できました!', cx, window.innerHeight * 0.42);
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('つぎは いっしょに しあいが できるようになるよ', cx, window.innerHeight * 0.42 + 30);
+  } else if (ONLINE.status === 'error') {
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillStyle = '#ffb3b3';
+    ctx.fillText(ONLINE.errorMsg || 'エラーが おきました', cx, window.innerHeight * 0.42);
+  } else {
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillStyle = '#ffe14d';
+    ctx.fillText('せつぞくちゅう…', cx, window.innerHeight * 0.42);
+  }
+
+  drawOnlineBackLink('やめて もどる');
 }
 
 function drawModeButton(rect, label, sub, color) {
@@ -4183,6 +4526,10 @@ function draw() {
   if (APP.screen === 'timeSelect') { drawTimeSelectScreen(); return; }
   if (APP.screen === 'levelSelect') { drawLevelSelectScreen(); return; }
   if (APP.screen === 's7Setup') { drawS7SetupScreen(); return; }
+  if (APP.screen === 'onlineMenu') { drawOnlineMenuScreen(); return; }
+  if (APP.screen === 'onlineHost') { drawOnlineHostScreen(); return; }
+  if (APP.screen === 'onlineJoinEntry') { drawOnlineJoinEntryScreen(); return; }
+  if (APP.screen === 'onlineJoinConnecting') { drawOnlineJoinConnectingScreen(); return; }
   if (APP.screen === 'result') {
     if (MATCH.mode === 's7') { drawS7ResultScreen(); return; }
     if (MATCH.mode === 'versus') drawVersusResultScreen(); else drawResultScreen();
