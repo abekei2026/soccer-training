@@ -130,6 +130,8 @@ const userPlayer = players[0];
 // そうさモード: 'fixed'=いつも同じ選手 / followBall有効時はボールを持っている人を自動操作
 const control = { followBall: false };
 let controlledPlayer = userPlayer;
+// オンラインたいせん(Phase 3)でゲストが操作する赤選手(ボールを持つと自動で切り替わる。controlledPlayerの赤版)
+let controlledDefender = null;
 
 const defenders = [
   makeDefender(10, FIELD.w * 0.3, 11, false),  // 敵DF(あか)
@@ -427,7 +429,8 @@ const ONLINE = {
   code: '',        // ホストの4桁のへやコード
   inputCode: '',   // ゲストが入力中のコード(最大4桁)
   status: 'idle',  // 'idle' / 'connecting' / 'waiting' / 'connected' / 'error'
-  errorMsg: ''
+  errorMsg: '',
+  guestInput: { dx: 0, dy: 0 }  // ホスト側: ゲストから届いた最新のスティック入力
 };
 const ONLINE_ID_PREFIX = 'soccer-atama-';
 
@@ -444,6 +447,7 @@ function onlineReset() {
   ONLINE.inputCode = '';
   ONLINE.status = 'idle';
   ONLINE.errorMsg = '';
+  ONLINE.guestInput = { dx: 0, dy: 0 };
 }
 
 const ONLINE_SCREENS = ['onlineMenu', 'onlineHost', 'onlineJoinEntry', 'onlineJoinConnecting'];
@@ -451,6 +455,7 @@ const ONLINE_SCREENS = ['onlineMenu', 'onlineHost', 'onlineJoinEntry', 'onlineJo
 function onlineSetupConn(conn) {
   ONLINE.conn = conn;
   conn.on('open', () => { ONLINE.status = 'connected'; });
+  conn.on('data', data => { onlineHandleData(data); });
   conn.on('close', () => {
     const wasOnlineScreen = ONLINE_SCREENS.includes(APP.screen);
     onlineReset();
@@ -494,6 +499,123 @@ function onlineJoin(code) {
   peer.on('error', () => {
     ONLINE.status = 'error';
     ONLINE.errorMsg = 'せつぞく できませんでした(コードを かくにんしてね)';
+  });
+}
+
+// ---------- オンラインたいせんモード(Phase 2: ホストが試合を進行、ゲストは受信して描画するだけ) ----------
+ONLINE.sendTimer = 0;
+
+function onlineHandleData(data) {
+  if (!data) return;
+  if (data.t === 'st') onlineApplyVersusState(data);
+  else if (data.t === 'in') { ONLINE.guestInput.dx = data.dx; ONLINE.guestInput.dy = data.dy; }
+  else if (data.t === 'tap') onlineHandleGuestTap(data.fx, data.fy);
+}
+
+// ホスト側: ゲストから届いた最新のスティック入力を、操作中の赤選手に反映する(controlledPlayerの青の入力処理と同じ式)
+function onlineApplyGuestInput(p) {
+  const gi = ONLINE.guestInput;
+  const ilen = Math.hypot(gi.dx, gi.dy);
+  if (ilen > 0.01) {
+    const n = Math.min(1, ilen);
+    p.vx = gi.dx / ilen * PLAYER_SPEED * n;
+    p.vy = gi.dy / ilen * PLAYER_SPEED * n;
+    p.fx = gi.dx / ilen; p.fy = gi.dy / ilen;
+  } else {
+    p.vx = 0; p.vy = 0;
+  }
+}
+
+// ホスト側: ゲストのタップ(フィールド座標)を、赤のシュート/パスとして処理する(青のタップ処理の赤版)
+function onlineHandleGuestTap(fx, fy) {
+  if (MATCH.mode !== 'versus' || MATCH.state !== 'play' || MATCH.paused) return;
+  if (!controlledDefender || MATCH.attacker !== 'red' || ball.owner !== controlledDefender) return;
+  const goalCx = FIELD.w / 2;
+  if (fy > FIELD.h - 3.0 && Math.abs(fx - goalCx) < FIELD.goalW / 2 + 1.5) {
+    const aimX = Math.max(goalCx - FIELD.goalW / 2 + 0.4,
+                 Math.min(goalCx + FIELD.goalW / 2 - 0.4, fx));
+    versusShoot(controlledDefender, aimX, FIELD.h);
+    return;
+  }
+  let best = null, bestD = TAP_RADIUS;
+  for (const d of defenders) {
+    if (d === controlledDefender || d.isGK) continue;
+    const dist = Math.hypot(d.x - fx, d.y - fy);
+    if (dist < bestD) { bestD = dist; best = d; }
+  }
+  if (best) versusPass(controlledDefender, best);
+}
+
+// ゲスト側: 自分のスティック/キー/かたむき入力を毎フレーム読み取ってホストへ送る(自分では選手を動かさない)
+ONLINE.sendInputTimer = 0;
+function onlineSendGuestInput(dt) {
+  if (!(ONLINE.conn && ONLINE.status === 'connected')) return;
+  let ix = 0, iy = 0;
+  if (keys['ArrowLeft']  || keys['a'] || keys['A']) ix -= 1;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) ix += 1;
+  if (keys['ArrowUp']    || keys['w'] || keys['W']) iy -= 1;
+  if (keys['ArrowDown']  || keys['s'] || keys['S']) iy += 1;
+  if (stick.active) { ix += stick.dx; iy += stick.dy; }
+  if (tilt.enabled && tilt.beta0 !== null) {
+    ix += tiltAxis(tilt.gamma - tilt.gamma0);
+    iy += tiltAxis(tilt.beta - tilt.beta0);
+  }
+  ONLINE.sendInputTimer -= dt;
+  if (ONLINE.sendInputTimer > 0) return;
+  ONLINE.sendInputTimer = 1 / 30;
+  ONLINE.conn.send({ t: 'in', dx: ix, dy: iy });
+}
+
+// ゲスト側: ホストから届いた状態をそのまま選手・ボール・スコアに反映する(自分ではシミュレーションしない)
+function onlineApplyVersusState(data) {
+  if (data.ball) { ball.x = data.ball.x; ball.y = data.ball.y; }
+  if (data.players) {
+    data.players.forEach((d, i) => {
+      const p = players[i];
+      if (p) { p.x = d.x; p.y = d.y; p.fx = d.fx; p.fy = d.fy; }
+    });
+  }
+  if (data.defenders) {
+    data.defenders.forEach((d, i) => {
+      const p = defenders[i];
+      if (p) { p.x = d.x; p.y = d.y; p.fx = d.fx; p.fy = d.fy; }
+    });
+  }
+  if (data.blueGK) {
+    blueGK.x = data.blueGK.x; blueGK.y = data.blueGK.y;
+    blueGK.fx = data.blueGK.fx; blueGK.fy = data.blueGK.fy;
+  }
+  if (data.match) {
+    MATCH.blueScore = data.match.blueScore;
+    MATCH.redScore = data.match.redScore;
+    MATCH.attacker = data.match.attacker;
+    MATCH.state = data.match.state;
+    MATCH.timeLeft = data.match.timeLeft;
+    MATCH.message = data.match.message;
+  }
+  if (ONLINE.role === 'guest' && (data.appScreen === 'play' || data.appScreen === 'result')) {
+    MATCH.mode = 'versus';
+    APP.screen = data.appScreen;
+  }
+}
+
+// ホスト側: 現在の試合の状態を20Hzくらいでゲストへ送る
+function onlineBroadcastVersusState(dt) {
+  if (!(ONLINE.role === 'host' && ONLINE.conn && ONLINE.status === 'connected')) return;
+  ONLINE.sendTimer -= dt;
+  if (ONLINE.sendTimer > 0) return;
+  ONLINE.sendTimer = 1 / 20;
+  ONLINE.conn.send({
+    t: 'st',
+    appScreen: APP.screen,
+    ball: { x: ball.x, y: ball.y },
+    players: players.map(p => ({ x: p.x, y: p.y, fx: p.fx, fy: p.fy })),
+    defenders: defenders.map(p => ({ x: p.x, y: p.y, fx: p.fx, fy: p.fy })),
+    blueGK: { x: blueGK.x, y: blueGK.y, fx: blueGK.fx, fy: blueGK.fy },
+    match: {
+      blueScore: MATCH.blueScore, redScore: MATCH.redScore, attacker: MATCH.attacker,
+      state: MATCH.state, timeLeft: MATCH.timeLeft, message: MATCH.message
+    }
   });
 }
 
@@ -819,6 +941,10 @@ function onlineJoinConfirmRect() {
   const w = 240;
   return [(window.innerWidth - w) / 2, startY + 4 * (h + gapY) + 16, w, 54];
 }
+function onlineStartMatchButtonRect() {
+  const w = 240, h = 54;
+  return [(window.innerWidth - w) / 2, window.innerHeight * 0.34 + 50, w, h];
+}
 
 // ---------- しあいモード: 設定画面(Phase 3) ----------
 // 設定行の定義(2ページに分けて表示する)
@@ -1138,6 +1264,9 @@ function handleTap(sx, sy) {
     return;
   }
   if (APP.screen === 'onlineHost') {
+    if (ONLINE.status === 'connected' && inRect(sx, sy, onlineStartMatchButtonRect())) {
+      sfxClick(); APP.screen = 'timeSelect'; return;
+    }
     if (inRect(sx, sy, onlineBackLinkRect())) { sfxClick(); onlineReset(); APP.screen = 'title'; }
     return;
   }
@@ -1196,6 +1325,11 @@ function handleTap(sx, sy) {
     return;
   }
   if (APP.screen === 'result') {
+    if (ONLINE.role === 'guest') {
+      // ゲストは観る側。つぎの試合を決めるのはホストなので、ここではタイトルへ戻る操作だけ受け付ける
+      if (inTitleLink(sx, sy)) { sfxClick(); onlineReset(); APP.screen = 'title'; }
+      return;
+    }
     if (inReplayButton(sx, sy)) {
       sfxClick();
       if (MATCH.mode === 's7') s7Start();
@@ -1288,6 +1422,13 @@ function handleTap(sx, sy) {
   }
 
   if (MATCH.mode === 'versus') {
+    if (ONLINE.role === 'guest') {
+      // ゲストはポーズ/せっていに触れない(止められるのはホストだけ)。タップはフィールド座標に変換してホストへ送るだけ
+      if (MATCH.state !== 'play') return;
+      const [gfx, gfy] = toField(sx, sy);
+      if (ONLINE.conn) ONLINE.conn.send({ t: 'tap', fx: gfx, fy: gfy });
+      return;
+    }
     // ポーズ中: せっていパネルの操作のみ受け付ける
     if (MATCH.paused) {
       if (tilt.supported && inRect(sx, sy, versusTiltRowRect())) return; // タップはtouchendで処理
@@ -1573,8 +1714,10 @@ function versusShoot(from, aimX, goalY, speedMult) {
 
 // ボールを持っている人を操作できるように、青選手が保持したら操作対象を切り替える
 // (青GKは操作対象にしない。ユーザーは常にフィールドプレーヤーを操作する)
+// 赤も同様にcontrolledDefenderを切り替える(オンラインたいせんでゲストが操作する対象)
 function maybeSwitchControlToBallOwner(p) {
   if (p.team === 'blue' && !p.isGK) controlledPlayer = p;
+  if (p.team === 'red' && !p.isGK) controlledDefender = p;
 }
 
 function versusGiveBall(p) {
@@ -1663,7 +1806,7 @@ function versusFormation(attacker) {
   ball.owner = kicker;
   ball.receiver = null;
   ball.vx = 0; ball.vy = 0;
-  if (kicker.team === 'blue') controlledPlayer = kicker;
+  if (kicker.team === 'blue') controlledPlayer = kicker; else controlledDefender = kicker;
   if (kicker !== controlledPlayer) {
     kicker.holdTimer = 0;
     kicker.holdLimit = 0.9 + Math.random() * 0.9;
@@ -1828,10 +1971,12 @@ function updateVersus(dt) {
   if (MATCH.attacker === 'blue') versusGKIdle(blueGK, dt, 'blue');
   else versusGKDefend(blueGK, dt, 'blue');
 
-  // 赤チームAI
+  // 赤チーム(オンラインたいせんPhase 3: ホストはゲストの入力でcontrolledDefenderだけ動かし、残りはAI)
+  const guestControlsRed = ONLINE.role === 'host' && ONLINE.conn && ONLINE.status === 'connected';
   for (const d of defenders) {
     if (d.isGK) continue;
-    if (MATCH.attacker === 'red') versusAttackAI(d, dt, 'red');
+    if (guestControlsRed && d === controlledDefender) onlineApplyGuestInput(d);
+    else if (MATCH.attacker === 'red') versusAttackAI(d, dt, 'red');
     else versusDefendAI(d, dt, 'red');
   }
   const redGK = defenders.find(d => d.isGK);
@@ -3630,10 +3775,23 @@ function drawOnlineHostScreen() {
   if (ONLINE.status === 'connected') {
     ctx.font = 'bold 22px sans-serif';
     ctx.fillStyle = '#8fffb0';
-    ctx.fillText('せつぞく できました!', cx, window.innerHeight * 0.42);
+    ctx.fillText('せつぞく できました!', cx, window.innerHeight * 0.34);
     ctx.font = '14px sans-serif';
     ctx.fillStyle = '#ffffff';
-    ctx.fillText('つぎは いっしょに しあいが できるようになるよ', cx, window.innerHeight * 0.42 + 30);
+    ctx.fillText('しあいの じゅんびを すすめよう', cx, window.innerHeight * 0.34 + 26);
+
+    const [bx, by, bw, bh] = onlineStartMatchButtonRect();
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 300);
+    ctx.fillStyle = `rgba(150,255,170,${0.85 + 0.15 * pulse})`;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 14);
+    ctx.fill();
+    ctx.strokeStyle = '#1d5c2a';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#1d5c2a';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText('しあいの せってい へ', bx + bw / 2, by + bh / 2 + 6);
   } else if (ONLINE.status === 'error') {
     ctx.font = 'bold 20px sans-serif';
     ctx.fillStyle = '#ffb3b3';
@@ -3748,7 +3906,7 @@ function drawOnlineJoinConnectingScreen() {
     ctx.fillText('せつぞく できました!', cx, window.innerHeight * 0.42);
     ctx.font = '14px sans-serif';
     ctx.fillStyle = '#ffffff';
-    ctx.fillText('つぎは いっしょに しあいが できるようになるよ', cx, window.innerHeight * 0.42 + 30);
+    ctx.fillText('あいてが しあいを はじめるのを まってるよ…', cx, window.innerHeight * 0.42 + 30);
   } else if (ONLINE.status === 'error') {
     ctx.font = 'bold 20px sans-serif';
     ctx.fillStyle = '#ffb3b3';
@@ -4033,16 +4191,22 @@ function drawVersusResultScreen() {
   ctx.fillText('あなた ' + MATCH.blueScore + ' - ' + MATCH.redScore + ' あいて', cx, window.innerHeight * 0.26);
 
   const [rbx, rby, rbw, rbh] = replayButtonRect();
-  ctx.fillStyle = 'rgba(255,225,77,0.92)';
-  ctx.beginPath();
-  ctx.roundRect(rbx, rby, rbw, rbh, 14);
-  ctx.fill();
-  ctx.strokeStyle = '#553c00';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  ctx.fillStyle = '#553c00';
-  ctx.font = 'bold 20px sans-serif';
-  ctx.fillText('もういちど あそぶ', rbx + rbw / 2, rby + rbh / 2 + 7);
+  if (ONLINE.role === 'guest') {
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('あいてが つぎの しあいを きめるよ', rbx + rbw / 2, rby + rbh / 2 + 7);
+  } else {
+    ctx.fillStyle = 'rgba(255,225,77,0.92)';
+    ctx.beginPath();
+    ctx.roundRect(rbx, rby, rbw, rbh, 14);
+    ctx.fill();
+    ctx.strokeStyle = '#553c00';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#553c00';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('もういちど あそぶ', rbx + rbw / 2, rby + rbh / 2 + 7);
+  }
 
   const [tbx, tby, tbw, tbh] = titleLinkRect();
   ctx.fillStyle = '#ffffff';
@@ -4594,7 +4758,10 @@ function loop(now) {
       }
     }
   } else if (APP.screen === 'play' && MATCH.mode === 'versus') {
-    if (!MATCH.paused) {
+    if (ONLINE.role === 'guest') {
+      // ゲストは自分でシミュレーションしない。入力だけホストへ送り、状態は受信してそのまま描画する
+      onlineSendGuestInput(rawDt);
+    } else if (!MATCH.paused) {
       MATCH.timeLeft -= rawDt;
       if (MATCH.timeLeft <= 0) {
         MATCH.timeLeft = 0;
@@ -4602,6 +4769,7 @@ function loop(now) {
       } else {
         updateVersus(rawDt);
       }
+      onlineBroadcastVersusState(rawDt);
     }
   } else if (APP.screen === 'play') {
     if (!game.paused) {
