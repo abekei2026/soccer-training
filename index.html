@@ -433,7 +433,9 @@ const ONLINE = {
   status: 'idle',  // 'idle' / 'connecting' / 'waiting' / 'connected' / 'error'
   errorMsg: '',
   guestInput: { dx: 0, dy: 0 },  // ホスト側: ゲストから届いた最新のスティック入力
-  myControlled: null             // ゲスト側: 自分が操作している選手(むらさきの強調表示用)
+  myControlled: null,            // ゲスト側: 自分が操作している選手(むらさきの強調表示用)
+  lastRecvAt: 0,                 // 最後にデータを受信した時刻(切断検知用)
+  hostPaused: false              // ゲスト側: ホストが中断中か
 };
 const ONLINE_ID_PREFIX = 'soccer-atama-';
 
@@ -452,23 +454,36 @@ function onlineReset() {
   ONLINE.errorMsg = '';
   ONLINE.guestInput = { dx: 0, dy: 0 };
   ONLINE.myControlled = null;
+  ONLINE.lastRecvAt = 0;
+  ONLINE.hostPaused = false;
 }
 
 const ONLINE_SCREENS = ['onlineMenu', 'onlineHost', 'onlineJoinEntry', 'onlineJoinConnecting'];
 
 function onlineSetupConn(conn) {
   ONLINE.conn = conn;
-  conn.on('open', () => { ONLINE.status = 'connected'; });
-  conn.on('data', data => { onlineHandleData(data); });
-  conn.on('close', () => {
-    const wasOnlineScreen = ONLINE_SCREENS.includes(APP.screen);
-    onlineReset();
-    if (wasOnlineScreen) APP.screen = 'title';
-  });
-  conn.on('error', () => {
-    ONLINE.status = 'error';
-    ONLINE.errorMsg = 'せつぞくが きれました';
-  });
+  conn.on('open', () => { ONLINE.status = 'connected'; ONLINE.lastRecvAt = performance.now(); });
+  conn.on('data', data => { ONLINE.lastRecvAt = performance.now(); onlineHandleData(data); });
+  conn.on('close', () => onlineHandleDisconnect());
+  conn.on('error', () => onlineHandleDisconnect());
+}
+
+// 通信が切れたときの後始末。試合中でも画面が固まらないようにする
+// - ホストは相手が抜けてもAIとのたいせんとして続行できる(そのまま継続)
+// - ゲストは自分でシミュレーションできないのでタイトルへ戻す
+function onlineHandleDisconnect() {
+  if (!ONLINE.role) return;   // すでに後始末済み
+  const role = ONLINE.role;
+  const inMatch = (APP.screen === 'play' || APP.screen === 'result');
+  onlineReset();
+  if (role === 'host' && inMatch) {
+    showToast('あいてが たいじょうしました。AIとの たいせんに きりかえます');
+  } else {
+    MATCH.mode = null;
+    S7.paused = false;
+    APP.screen = 'title';
+    showToast('あいてとの せつぞくが きれました');
+  }
 }
 
 // へやを つくる(ホスト): 4桁コードでPeerを作り、あいてからの接続を待つ
@@ -668,6 +683,7 @@ function onlineBroadcastS7State(dt) {
     all: s7All.map(p => ({ x: p.x, y: p.y, fx: p.fx, fy: p.fy })),
     ctrl: controlledRed ? s7All.indexOf(controlledRed) : -1,
     owner: ball.owner ? s7All.indexOf(ball.owner) : -1,
+    paused: S7.paused,
     s7: {
       score: S7.score, redScore: S7.redScore, attacker: S7.attacker,
       state: S7.state, timeLeft: S7.timeLeft, message: S7.message
@@ -677,17 +693,28 @@ function onlineBroadcastS7State(dt) {
 
 // ゲスト側: ホストから届いたしあいモードの状態を全選手・ボール・スコアへ反映(自分ではシミュレーションしない)
 function onlineApplyS7State(data) {
-  const enteringPlay = (ONLINE.role === 'guest' && MATCH.mode !== 's7' && data.appScreen === 'play');
-  if (data.ball) { ball.x = data.ball.x; ball.y = data.ball.y; }
+  // 試合に入る瞬間(初参加 or 結果画面からの再戦)は補間せず即座に位置を合わせる
+  const enteringPlay = (ONLINE.role === 'guest' && data.appScreen === 'play' &&
+                        (MATCH.mode !== 's7' || APP.screen === 'result'));
+  // 受信位置は「目標(net)」として持ち、描画は毎フレームそこへ補間して寄せる(20Hz受信のカクつきを減らす)
+  // 試合に入った最初のフレームだけは即座に合わせる
+  if (data.ball) {
+    ball.netX = data.ball.x; ball.netY = data.ball.y;
+    if (enteringPlay) { ball.x = data.ball.x; ball.y = data.ball.y; }
+  }
   if (data.all) {
     data.all.forEach((d, i) => {
       const p = s7All[i];
-      if (p) { p.x = d.x; p.y = d.y; p.fx = d.fx; p.fy = d.fy; }
+      if (p) {
+        p.netX = d.x; p.netY = d.y; p.fx = d.fx; p.fy = d.fy;
+        if (enteringPlay) { p.x = d.x; p.y = d.y; }
+      }
     });
   }
   // ボール保持者を復元(黄色いリングの描画用)。ゲストはボール保持を判定しないので受信値で上書きする
   ball.owner = (typeof data.owner === 'number' && data.owner >= 0) ? (s7All[data.owner] || null) : null;
   ONLINE.myControlled = (typeof data.ctrl === 'number' && data.ctrl >= 0) ? (s7All[data.ctrl] || null) : null;
+  ONLINE.hostPaused = !!data.paused;   // ホストが設定画面などで中断しているか
   if (data.s7) {
     S7.score = data.s7.score;
     S7.redScore = data.s7.redScore;
@@ -702,6 +729,20 @@ function onlineApplyS7State(data) {
     APP.screen = data.appScreen;
   }
   if (enteringPlay) { S7.cam.x = ball.x; S7.cam.y = ball.y; }
+}
+
+// ゲスト側: 描画位置を目標(net)へなめらかに寄せる(20Hz受信のカクつきを補間でならす)
+function onlineInterpolateS7(dt) {
+  const k = Math.min(1, dt * 12);
+  for (const p of s7All) {
+    if (p.netX === undefined) continue;
+    p.x += (p.netX - p.x) * k;
+    p.y += (p.netY - p.y) * k;
+  }
+  if (ball.netX !== undefined) {
+    ball.x += (ball.netX - ball.x) * k;
+    ball.y += (ball.netY - ball.y) * k;
+  }
 }
 
 // プレー統計(ラウンド終了時のアドバイスに使う)
@@ -4813,6 +4854,14 @@ function s7Draw() {
   s7DrawMinimap();
   s7DrawCenterMessage();
   s7DrawPauseMenu();
+  if (ONLINE.role === 'guest' && ONLINE.hostPaused) {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+    ctx.fillStyle = '#ffe14d';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('あいてが ちゅうだんちゅう…', window.innerWidth / 2, window.innerHeight / 2);
+  }
 }
 
 function draw() {
@@ -4873,30 +4922,40 @@ function loop(now) {
 
   if (APP.screen === 'play' && MATCH.mode === 's7') {
     if (ONLINE.role === 'guest') {
-      // ゲストは自分でシミュレーションしない。入力をホストへ送り、受信状態を描画し、カメラだけボールに追従させる
+      // ゲストは自分でシミュレーションしない。入力をホストへ送り、受信状態を補間して描画し、カメラだけボールに追従させる
       onlineSendGuestInput(rawDt);
+      onlineInterpolateS7(rawDt);
       s7UpdateCam(rawDt);
-    } else if (!S7.paused) {
-      S7.timeLeft -= rawDt;
-      if (S7.timeLeft <= 0) {
-        S7.timeLeft = 0;
-        s7EndMatch();
-      } else {
-        if (judge.active) {
-          judge.timer -= rawDt;
-          if (judge.timer <= 0) {
-            judge.timer = 0;
-            judge.active = false;
+      // 一定時間データが届かなければ切断とみなす(相手が突然オフラインになった場合の保険)
+      if (ONLINE.lastRecvAt && performance.now() - ONLINE.lastRecvAt > 5000) onlineHandleDisconnect();
+    } else {
+      if (!S7.paused) {
+        S7.timeLeft -= rawDt;
+        if (S7.timeLeft <= 0) {
+          S7.timeLeft = 0;
+          s7EndMatch();
+        } else {
+          if (judge.active) {
+            judge.timer -= rawDt;
+            if (judge.timer <= 0) {
+              judge.timer = 0;
+              judge.active = false;
+            }
           }
+          s7Update(rawDt * (judge.active ? SLOWMO_SCALE : 1));
         }
-        s7Update(rawDt * (judge.active ? SLOWMO_SCALE : 1));
       }
+      // ポーズ中も送り続ける(ハートビート): 位置は止まったままだが接続が生きていることをゲストに伝える
       onlineBroadcastS7State(rawDt);
+      // ホスト: ゲストからの入力が途絶えたら退場とみなし、AIとのたいせんに切り替えて続行
+      if (ONLINE.role === 'host' && ONLINE.status === 'connected' &&
+          ONLINE.lastRecvAt && performance.now() - ONLINE.lastRecvAt > 5000) onlineHandleDisconnect();
     }
   } else if (APP.screen === 'play' && MATCH.mode === 'versus') {
     if (ONLINE.role === 'guest') {
       // ゲストは自分でシミュレーションしない。入力だけホストへ送り、状態は受信してそのまま描画する
       onlineSendGuestInput(rawDt);
+      if (ONLINE.lastRecvAt && performance.now() - ONLINE.lastRecvAt > 5000) onlineHandleDisconnect();
     } else if (!MATCH.paused) {
       MATCH.timeLeft -= rawDt;
       if (MATCH.timeLeft <= 0) {
@@ -4906,6 +4965,8 @@ function loop(now) {
         updateVersus(rawDt);
       }
       onlineBroadcastVersusState(rawDt);
+      if (ONLINE.role === 'host' && ONLINE.status === 'connected' &&
+          ONLINE.lastRecvAt && performance.now() - ONLINE.lastRecvAt > 5000) onlineHandleDisconnect();
     }
   } else if (APP.screen === 'play') {
     if (!game.paused) {
