@@ -439,6 +439,18 @@ const ONLINE = {
 };
 const ONLINE_ID_PREFIX = 'soccer-atama-';
 
+// P2P接続のためのICEサーバー。STUNだけでは厳しいNAT(学校/モバイル回線など)を越えられないので、
+// 無料のTURN(中継)サーバー(Open Relay Project)も足して接続の成功率を上げる。
+const ONLINE_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.relay.metered.ca:80' },
+  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+];
+const ONLINE_PEER_OPTS = { config: { iceServers: ONLINE_ICE_SERVERS } };
+
 function onlineRandomCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
@@ -464,8 +476,20 @@ function onlineSetupConn(conn) {
   ONLINE.conn = conn;
   conn.on('open', () => { ONLINE.status = 'connected'; ONLINE.lastRecvAt = performance.now(); });
   conn.on('data', data => { ONLINE.lastRecvAt = performance.now(); onlineHandleData(data); });
-  conn.on('close', () => onlineHandleDisconnect());
-  conn.on('error', () => onlineHandleDisconnect());
+  conn.on('close', () => onlineConnClosed());
+  conn.on('error', () => onlineConnClosed());
+}
+
+// データ接続が閉じた/失敗したとき。すでに繋がっていたかどうかで扱いを分ける
+function onlineConnClosed() {
+  const wasConnected = (ONLINE.status === 'connected' || APP.screen === 'play' || APP.screen === 'result');
+  if (wasConnected) {
+    onlineHandleDisconnect();               // 繋がっていた相手が切れた → 通常の切断処理
+  } else if (ONLINE.role === 'guest') {
+    ONLINE.status = 'error';                // ゲストが接続前に失敗 → エラー表示(もどって再試行)
+    ONLINE.errorMsg = 'せつぞく できませんでした。もういちど ためしてね';
+  }
+  // ホストが接続確立前に失敗したときは何もしない(別のゲストの接続を待ち続ける)
 }
 
 // 通信が切れたときの後始末。試合中でも画面が固まらないようにする
@@ -493,7 +517,7 @@ function onlineHost() {
   ONLINE.status = 'connecting';
   ONLINE.code = onlineRandomCode();
   APP.screen = 'onlineHost';
-  const peer = new Peer(ONLINE_ID_PREFIX + ONLINE.code);
+  const peer = new Peer(ONLINE_ID_PREFIX + ONLINE.code, ONLINE_PEER_OPTS);
   ONLINE.peer = peer;
   peer.on('open', () => { ONLINE.status = 'waiting'; });
   peer.on('connection', conn => { onlineSetupConn(conn); });
@@ -509,10 +533,10 @@ function onlineJoin(code) {
   ONLINE.role = 'guest';
   ONLINE.status = 'connecting';
   APP.screen = 'onlineJoinConnecting';
-  const peer = new Peer();
+  const peer = new Peer(undefined, ONLINE_PEER_OPTS);
   ONLINE.peer = peer;
   peer.on('open', () => {
-    const conn = peer.connect(ONLINE_ID_PREFIX + code);
+    const conn = peer.connect(ONLINE_ID_PREFIX + code, { reliable: true });
     onlineSetupConn(conn);
   });
   peer.on('error', () => {
@@ -3996,7 +4020,7 @@ function drawTitleScreen() {
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
   ctx.font = '10px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText('v33', cx, window.innerHeight - 8);
+  ctx.fillText('v34', cx, window.innerHeight - 8);
 }
 
 // ---------- オンラインたいせんモード: 画面びょうが(Phase 1) ----------
@@ -4087,6 +4111,11 @@ function drawOnlineHostScreen() {
     ctx.fillStyle = '#ffffff';
     const msg = ONLINE.status === 'waiting' ? 'あいてが はいってくるのを まってるよ…' : 'じゅんびちゅう…';
     ctx.fillText(msg, cx, window.innerHeight * 0.42 + 60);
+
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText('つながらない ときは Wi-Fiや でんぱの', cx, window.innerHeight * 0.42 + 92);
+    ctx.fillText('よい ところで もういちど ためしてね', cx, window.innerHeight * 0.42 + 110);
   }
 
   drawOnlineBackLink('やめて タイトルへ');
@@ -4191,6 +4220,10 @@ function drawOnlineJoinConnectingScreen() {
     ctx.font = 'bold 18px sans-serif';
     ctx.fillStyle = '#ffe14d';
     ctx.fillText('せつぞくちゅう…', cx, window.innerHeight * 0.42);
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText('すこし じかんが かかることが あります', cx, window.innerHeight * 0.42 + 28);
+    ctx.fillText('つながらない ときは でんぱの よい ところで', cx, window.innerHeight * 0.42 + 46);
   }
 
   drawOnlineBackLink('やめて もどる');
